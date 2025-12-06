@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.artd.pro)",
+      "Bash(cat:*)",
+      "Bash(curl:*)",
+      "Bash(dir:*)",
+      "Bash(python:*)",
+      "Bash(find:*)",
+      "Bash(sqlite3:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,76 @@
+192.168.1.3 2025-12-06 13:25:36.711 [req004] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+192.168.1.3 2025-12-06 13:25:36.722 [req003] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+10.0.0.1 2025-12-06 13:25:36.754 [req005] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+10.0.0.1 2025-12-06 13:25:36.775 [req003] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.2 2025-12-06 13:25:36.785 [req001] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+192.168.1.3 2025-12-06 13:25:36.806 [req004] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+192.168.1.1 2025-12-06 13:25:36.817 [req003] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.3 2025-12-06 13:25:36.828 [req005] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.1 2025-12-06 13:25:36.839 [req004] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.3 2025-12-06 13:25:36.850 [req003] | WARNING | generate_test_logs.generate_logs:80 : 内存使用率: 85%
+192.168.1.3 2025-12-06 13:25:36.871 [req005] | WARNING | generate_test_logs.generate_logs:80 : 重试第2次
+192.168.1.2 2025-12-06 13:25:36.881 [req001] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.2 2025-12-06 13:25:36.892 [req004] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+10.0.0.1 2025-12-06 13:25:36.913 [req004] | WARNING | generate_test_logs.generate_logs:80 : 内存使用率: 85%
+192.168.1.3 2025-12-06 13:25:36.924 [req002] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.1 2025-12-06 13:25:36.935 [req005] | WARNING | generate_test_logs.generate_logs:80 : 内存使用率: 85%
+192.168.1.1 2025-12-06 13:25:36.945 [req005] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.3 2025-12-06 13:25:36.956 [req001] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.2 2025-12-06 13:25:36.977 [req005] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.3 2025-12-06 13:25:36.988 [req003] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+192.168.1.1 2025-12-06 13:25:36.999 [req001] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+127.0.0.1 2025-12-06 13:25:37.009 [req002] | WARNING | generate_test_logs.generate_logs:80 : 缓存未命中: session_xyz
+127.0.0.1 2025-12-06 13:25:37.020 [req001] | WARNING | generate_test_logs.generate_logs:80 : 响应时间较慢: 1200ms
+192.168.1.1 2025-12-06 13:25:37.031 [req003] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.1 2025-12-06 13:25:37.041 [req005] | WARNING | generate_test_logs.generate_logs:80 : 重试第2次
+10.0.0.1 2025-12-06 13:25:37.052 [req002] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+10.0.0.1 2025-12-06 13:25:37.073 [req001] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+127.0.0.1 2025-12-06 13:25:37.147 [req001] | WARNING | generate_test_logs.generate_logs:80 : 重试第2次
+127.0.0.1 2025-12-06 13:25:37.158 [req004] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.3 2025-12-06 13:25:37.179 [req005] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.2 2025-12-06 13:25:37.200 [req003] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.1 2025-12-06 13:25:37.212 [req001] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.3 2025-12-06 13:25:37.223 [req004] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+192.168.1.2 2025-12-06 13:25:37.233 [req001] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+10.0.0.1 2025-12-06 13:25:37.244 [req005] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.1 2025-12-06 13:25:37.265 [req005] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+127.0.0.1 2025-12-06 13:25:37.276 [req001] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+192.168.1.2 2025-12-06 13:25:37.287 [req004] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.1 2025-12-06 13:25:37.318 [req001] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+10.0.0.1 2025-12-06 13:25:37.329 [req004] | WARNING | generate_test_logs.generate_logs:80 : 缓存未命中: session_xyz
+192.168.1.1 2025-12-06 13:25:37.340 [req001] | ERROR | generate_test_logs.generate_logs:82 : API调用超时
+192.168.1.2 2025-12-06 13:25:37.351 [req001] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+127.0.0.1 2025-12-06 13:25:37.362 [req003] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+10.0.0.1 2025-12-06 13:25:37.373 [req002] | ERROR | generate_test_logs.generate_logs:82 : 数据库连接失败
+192.168.1.3 2025-12-06 13:25:37.384 [req001] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+10.0.0.1 2025-12-06 13:25:37.395 [req005] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+10.0.0.1 2025-12-06 13:25:37.415 [req001] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+192.168.1.1 2025-12-06 13:25:37.426 [req004] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.3 2025-12-06 13:25:37.447 [req002] | ERROR | generate_test_logs.generate_logs:82 : 文件读取错误: Permission denied
+192.168.1.1 2025-12-06 13:25:37.458 [req002] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+127.0.0.1 2025-12-06 13:25:37.469 [req004] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.1 2025-12-06 13:25:37.480 [req004] | WARNING | generate_test_logs.generate_logs:80 : 内存使用率: 85%
+192.168.1.3 2025-12-06 13:25:37.490 [req001] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.1 2025-12-06 13:25:37.501 [req002] | WARNING | generate_test_logs.generate_logs:80 : 响应时间较慢: 1200ms
+10.0.0.1 2025-12-06 13:25:37.513 [req003] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+127.0.0.1 2025-12-06 13:25:37.524 [req001] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.1 2025-12-06 13:25:37.534 [req004] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.2 2025-12-06 13:25:37.545 [req003] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+192.168.1.3 2025-12-06 13:25:37.555 [req004] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+192.168.1.3 2025-12-06 13:25:37.566 [req004] | ERROR | generate_test_logs.generate_logs:82 : API调用超时
+192.168.1.3 2025-12-06 13:25:37.577 [req004] | INFO | generate_test_logs.generate_logs:78 : 订单创建成功
+192.168.1.2 2025-12-06 13:25:37.588 [req003] | WARNING | generate_test_logs.generate_logs:80 : 响应时间较慢: 1200ms
+10.0.0.1 2025-12-06 13:25:37.599 [req002] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+192.168.1.1 2025-12-06 13:25:37.610 [req001] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.3 2025-12-06 13:25:37.621 [req003] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+192.168.1.2 2025-12-06 13:25:37.631 [req002] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.2 2025-12-06 13:25:37.642 [req005] | WARNING | generate_test_logs.generate_logs:80 : 响应时间较慢: 1200ms
+192.168.1.3 2025-12-06 13:25:37.653 [req002] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.2 2025-12-06 13:25:37.664 [req002] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+192.168.1.3 2025-12-06 13:25:37.675 [req004] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
+192.168.1.3 2025-12-06 13:25:37.696 [req004] | ERROR | generate_test_logs.generate_logs:82 : 网络连接中断
+192.168.1.2 2025-12-06 13:25:37.717 [req002] | INFO | generate_test_logs.generate_logs:78 : 数据查询完成
+192.168.1.1 2025-12-06 13:25:37.728 [req004] | INFO | generate_test_logs.generate_logs:78 : 用户登录成功
+10.0.0.1 2025-12-06 13:25:37.738 [req003] | INFO | generate_test_logs.generate_logs:78 : 文件上传成功
+127.0.0.1 2025-12-06 13:25:37.749 [req002] | WARNING | generate_test_logs.generate_logs:80 : 内存使用率: 85%
+127.0.0.1 2025-12-06 13:25:37.770 [req002] | INFO | generate_test_logs.generate_logs:78 : 邮件发送成功
