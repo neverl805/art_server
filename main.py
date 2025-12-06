@@ -17,17 +17,18 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 添加日志中间件
-app.add_middleware(LoggingMiddleware)
-
-# 配置CORS
+# 配置CORS - 必须在其他中间件之前添加
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 生产环境应该指定具体的前端域名
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]  # 允许前端访问所有响应头
 )
+
+# 添加日志中间件
+app.add_middleware(LoggingMiddleware)
 
 
 # 统一响应格式中间件
@@ -53,7 +54,7 @@ async def add_response_wrapper(request: Request, call_next):
 
                 # 如果已经是标准格式，直接返回
                 if isinstance(original_data, dict) and "code" in original_data:
-                    # 过滤掉会导致冲突的headers
+                    # 保留CORS相关headers，过滤掉会导致冲突的headers
                     filtered_headers = {
                         k: v for k, v in response.headers.items()
                         if k.lower() not in ['content-length', 'content-encoding', 'transfer-encoding']
@@ -71,7 +72,7 @@ async def add_response_wrapper(request: Request, call_next):
                     "data": original_data
                 }
 
-                # 过滤掉会导致冲突的headers
+                # 保留CORS相关headers，过滤掉会导致冲突的headers
                 filtered_headers = {
                     k: v for k, v in response.headers.items()
                     if k.lower() not in ['content-length', 'content-encoding', 'transfer-encoding']
@@ -86,7 +87,8 @@ async def add_response_wrapper(request: Request, call_next):
                 return Response(
                     content=body,
                     status_code=response.status_code,
-                    media_type=response.media_type
+                    media_type=response.media_type,
+                    headers=dict(response.headers)
                 )
 
     return response
