@@ -36,7 +36,7 @@ class LogService:
 
     def search_logs(self, params: LogSearchParams) -> LogListResponse:
         """
-        搜索日志
+        搜索日志（先分组再分页）
 
         Args:
             params: 搜索参数
@@ -45,71 +45,102 @@ class LogService:
             日志列表响应
         """
         with db_manager.get_connection() as conn:
-            cursor = conn.cursor()
+            # 显式开启事务，确保读取一致性
+            conn.execute('BEGIN')
+            try:
+                cursor = conn.cursor()
 
-            # 构建查询条件
-            where_clauses = []
-            query_params = []
+                # 构建查询条件
+                where_clauses = []
+                query_params = []
 
-            if params.request_id:
-                where_clauses.append("request_id LIKE ?")
-                query_params.append(f"%{params.request_id}%")
+                if params.request_id:
+                    where_clauses.append("request_id LIKE ?")
+                    query_params.append(f"%{params.request_id}%")
 
-            if params.level:
-                where_clauses.append("level = ?")
-                query_params.append(params.level.value)
+                if params.level:
+                    where_clauses.append("level = ?")
+                    query_params.append(params.level.value)
 
-            if params.ip:
-                where_clauses.append("ip LIKE ?")
-                query_params.append(f"%{params.ip}%")
+                if params.ip:
+                    where_clauses.append("ip LIKE ?")
+                    query_params.append(f"%{params.ip}%")
 
-            if params.module:
-                where_clauses.append("module LIKE ?")
-                query_params.append(f"%{params.module}%")
+                if params.module:
+                    where_clauses.append("module LIKE ?")
+                    query_params.append(f"%{params.module}%")
 
-            if params.start_time:
-                where_clauses.append("timestamp >= ?")
-                query_params.append(params.start_time.strftime('%Y-%m-%d %H:%M:%S'))
+                if params.start_time:
+                    where_clauses.append("timestamp >= ?")
+                    query_params.append(params.start_time.strftime('%Y-%m-%d %H:%M:%S'))
 
-            if params.end_time:
-                where_clauses.append("timestamp <= ?")
-                query_params.append(params.end_time.strftime('%Y-%m-%d %H:%M:%S'))
+                if params.end_time:
+                    where_clauses.append("timestamp <= ?")
+                    query_params.append(params.end_time.strftime('%Y-%m-%d %H:%M:%S'))
 
-            if params.keyword:
-                where_clauses.append("message LIKE ?")
-                query_params.append(f"%{params.keyword}%")
+                if params.keyword:
+                    where_clauses.append("message LIKE ?")
+                    query_params.append(f"%{params.keyword}%")
 
-            # 组装SQL
-            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+                # 组装SQL
+                where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-            # 获取总数
-            count_query = f"SELECT COUNT(*) as total FROM logs WHERE {where_sql}"
-            cursor.execute(count_query, query_params)
-            total = cursor.fetchone()['total']
+                # 【修复】先获取所有符合条件的 request_id（按时间倒序）
+                request_id_query = f"""
+                    SELECT DISTINCT request_id, MIN(timestamp) as start_time
+                    FROM logs
+                    WHERE {where_sql}
+                    GROUP BY request_id
+                    ORDER BY start_time DESC
+                """
+                cursor.execute(request_id_query, query_params)
+                all_request_ids = [row['request_id'] for row in cursor.fetchall()]
 
-            # 获取数据
-            data_query = f"""
-                SELECT * FROM logs
-                WHERE {where_sql}
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-            """
-            offset = (params.page - 1) * params.page_size
-            cursor.execute(data_query, query_params + [params.page_size, offset])
-            rows = cursor.fetchall()
+                # 总数是分组数（不是记录数）
+                total = len(all_request_ids)
 
-            # 转换为LogEntry
-            logs = [self._row_to_log_entry(row) for row in rows]
+                # 【修复】对分组结果进行分页
+                offset = (params.page - 1) * params.page_size
+                paged_request_ids = all_request_ids[offset:offset + params.page_size]
 
-            # 按request_id分组
-            log_groups = self._group_by_request_id(logs)
+                if not paged_request_ids:
+                    # 没有数据
+                    conn.commit()
+                    return LogListResponse(
+                        total=total,
+                        page=params.page,
+                        page_size=params.page_size,
+                        data=[]
+                    )
 
-            return LogListResponse(
-                total=total,
-                page=params.page,
-                page_size=params.page_size,
-                data=log_groups
-            )
+                # 【修复】获取这一页的所有日志记录
+                placeholders = ','.join('?' * len(paged_request_ids))
+                data_query = f"""
+                    SELECT * FROM logs
+                    WHERE {where_sql} AND request_id IN ({placeholders})
+                    ORDER BY timestamp DESC
+                """
+                cursor.execute(data_query, query_params + paged_request_ids)
+                rows = cursor.fetchall()
+
+                # 转换为LogEntry
+                logs = [self._row_to_log_entry(row) for row in rows]
+
+                # 按request_id分组
+                log_groups = self._group_by_request_id(logs)
+
+                # 提交事务
+                conn.commit()
+
+                return LogListResponse(
+                    total=total,
+                    page=params.page,
+                    page_size=params.page_size,
+                    data=log_groups
+                )
+            except Exception as e:
+                conn.rollback()
+                raise
 
     def get_log_detail(self, request_id: str) -> Optional[LogGroup]:
         """
@@ -146,90 +177,100 @@ class LogService:
             统计数据
         """
         with db_manager.get_connection() as conn:
-            cursor = conn.cursor()
+            # 显式开启事务，确保所有统计查询看到一致的数据快照
+            conn.execute('BEGIN')
+            try:
+                cursor = conn.cursor()
 
-            # 获取总数
-            cursor.execute("SELECT COUNT(*) as total FROM logs")
-            total = cursor.fetchone()['total']
+                # 获取总数
+                cursor.execute("SELECT COUNT(*) as total FROM logs")
+                total = cursor.fetchone()['total']
 
-            if total == 0:
+                if total == 0:
+                    conn.commit()
+                    return LogOverviewStats(
+                        total=0,
+                        error_count=0,
+                        warning_count=0,
+                        info_count=0,
+                        success_count=0,
+                        debug_count=0,
+                        request_count=0,
+                        ip_count=0,
+                        level_distribution={},
+                        timeline_data=[],
+                        ip_stats=[],
+                        recent_logs=[]
+                    )
+
+                # 统计各级别日志数
+                cursor.execute("""
+                    SELECT level, COUNT(*) as count
+                    FROM logs
+                    GROUP BY level
+                """)
+                level_counts = {row['level']: row['count'] for row in cursor.fetchall()}
+
+                # 统计request_id数量
+                cursor.execute("SELECT COUNT(DISTINCT request_id) as count FROM logs")
+                request_count = cursor.fetchone()['count']
+
+                # 统计IP数量
+                cursor.execute("SELECT COUNT(DISTINCT ip) as count FROM logs")
+                ip_count = cursor.fetchone()['count']
+
+                # IP统计 (Top 10)
+                cursor.execute("""
+                    SELECT ip, COUNT(*) as count
+                    FROM logs
+                    GROUP BY ip
+                    ORDER BY count DESC
+                    LIMIT 10
+                """)
+                ip_stats = [{"ip": row['ip'], "count": row['count']} for row in cursor.fetchall()]
+
+                # 时间线数据 (最近24小时，按小时统计)
+                cursor.execute("""
+                    SELECT
+                        strftime('%Y-%m-%d %H:00:00', timestamp) as hour,
+                        level,
+                        COUNT(*) as count
+                    FROM logs
+                    WHERE timestamp >= datetime('now', '-24 hours')
+                    GROUP BY hour, level
+                    ORDER BY hour
+                """)
+                timeline_rows = cursor.fetchall()
+                timeline_data = self._process_timeline_data(timeline_rows)
+
+                # 最近日志 (最新20条)
+                cursor.execute("""
+                    SELECT * FROM logs
+                    ORDER BY timestamp DESC
+                    LIMIT 20
+                """)
+                recent_logs = [self._row_to_log_entry(row) for row in cursor.fetchall()]
+
+                # 提交事务
+                conn.commit()
+
                 return LogOverviewStats(
-                    total=0,
-                    error_count=0,
-                    warning_count=0,
-                    info_count=0,
-                    success_count=0,
-                    debug_count=0,
-                    request_count=0,
-                    ip_count=0,
-                    level_distribution={},
-                    timeline_data=[],
-                    ip_stats=[],
-                    recent_logs=[]
+                    total=total,
+                    error_count=level_counts.get('ERROR', 0) + level_counts.get('CRITICAL', 0),
+                    warning_count=level_counts.get('WARNING', 0),
+                    info_count=level_counts.get('INFO', 0),
+                    success_count=level_counts.get('SUCCESS', 0),
+                    debug_count=level_counts.get('DEBUG', 0),
+                    request_count=request_count,
+                    ip_count=ip_count,
+                    level_distribution=level_counts,
+                    timeline_data=timeline_data,
+                    ip_stats=ip_stats,
+                    recent_logs=recent_logs
                 )
-
-            # 统计各级别日志数
-            cursor.execute("""
-                SELECT level, COUNT(*) as count
-                FROM logs
-                GROUP BY level
-            """)
-            level_counts = {row['level']: row['count'] for row in cursor.fetchall()}
-
-            # 统计request_id数量
-            cursor.execute("SELECT COUNT(DISTINCT request_id) as count FROM logs")
-            request_count = cursor.fetchone()['count']
-
-            # 统计IP数量
-            cursor.execute("SELECT COUNT(DISTINCT ip) as count FROM logs")
-            ip_count = cursor.fetchone()['count']
-
-            # IP统计 (Top 10)
-            cursor.execute("""
-                SELECT ip, COUNT(*) as count
-                FROM logs
-                GROUP BY ip
-                ORDER BY count DESC
-                LIMIT 10
-            """)
-            ip_stats = [{"ip": row['ip'], "count": row['count']} for row in cursor.fetchall()]
-
-            # 时间线数据 (最近24小时，按小时统计)
-            cursor.execute("""
-                SELECT
-                    strftime('%Y-%m-%d %H:00:00', timestamp) as hour,
-                    level,
-                    COUNT(*) as count
-                FROM logs
-                WHERE timestamp >= datetime('now', '-24 hours')
-                GROUP BY hour, level
-                ORDER BY hour
-            """)
-            timeline_rows = cursor.fetchall()
-            timeline_data = self._process_timeline_data(timeline_rows)
-
-            # 最近日志 (最新20条)
-            cursor.execute("""
-                SELECT * FROM logs
-                ORDER BY timestamp DESC
-                LIMIT 20
-            """)
-            recent_logs = [self._row_to_log_entry(row) for row in cursor.fetchall()]
-
-            return LogOverviewStats(
-                total=total,
-                error_count=level_counts.get('ERROR', 0) + level_counts.get('CRITICAL', 0),
-                warning_count=level_counts.get('WARNING', 0),
-                info_count=level_counts.get('INFO', 0),
-                success_count=level_counts.get('SUCCESS', 0),
-                debug_count=level_counts.get('DEBUG', 0),
-                request_count=request_count,
-                ip_count=ip_count,
-                level_distribution=level_counts,
-                timeline_data=timeline_data,
-                ip_stats=ip_stats,
-                recent_logs=recent_logs
-            )
+            except Exception as e:
+                conn.rollback()
+                raise
 
     def _row_to_log_entry(self, row) -> LogEntry:
         """

@@ -104,7 +104,16 @@ class DatabaseManager:
     @contextmanager
     def get_connection(self):
         """获取数据库连接 (上下文管理器)"""
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False,
+            timeout=30.0,  # 增加超时时间到30秒
+            isolation_level='DEFERRED'  # 延迟事务，支持读写并发
+        )
+        # 启用 WAL 模式，与写入端保持一致
+        conn.execute('PRAGMA journal_mode=WAL')
+        # 设置同步模式
+        conn.execute('PRAGMA synchronous=NORMAL')
         conn.row_factory = sqlite3.Row  # 返回字典格式的行
         try:
             yield conn
