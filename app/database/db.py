@@ -45,10 +45,37 @@ class DatabaseManager:
                 """)
                 if cursor.fetchone():
                     print(f"  - 数据库表验证成功")
+                    # 确保性能优化索引存在
+                    self._ensure_indexes(conn)
                 else:
                     print(f"[WARNING] logs表不存在")
         except Exception as e:
             print(f"[ERROR] 数据库验证失败: {e}")
+
+    def _ensure_indexes(self, conn):
+        """确保性能优化索引存在"""
+        cursor = conn.cursor()
+
+        # 获取现有索引
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        existing_indexes = {row['name'] for row in cursor.fetchall()}
+
+        # 需要创建的复合索引
+        indexes_to_create = {
+            # 复合索引：用于 GROUP BY request_id ORDER BY timestamp 查询
+            'idx_request_timestamp': 'CREATE INDEX IF NOT EXISTS idx_request_timestamp ON logs(request_id, timestamp DESC)',
+            # 复合索引：用于按时间范围筛选后的分组查询
+            'idx_timestamp_request': 'CREATE INDEX IF NOT EXISTS idx_timestamp_request ON logs(timestamp DESC, request_id)',
+        }
+
+        for idx_name, create_sql in indexes_to_create.items():
+            if idx_name not in existing_indexes:
+                try:
+                    cursor.execute(create_sql)
+                    conn.commit()
+                    print(f"  - 创建索引: {idx_name}")
+                except Exception as e:
+                    print(f"  - [WARNING] 创建索引 {idx_name} 失败: {e}")
 
     def _init_database(self):
         """初始化数据库和表结构"""

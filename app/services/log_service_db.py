@@ -36,7 +36,7 @@ class LogService:
 
     def search_logs(self, params: LogSearchParams) -> LogListResponse:
         """
-        搜索日志（先分组再分页）
+        搜索日志（先分组再分页）- 优化版本
 
         Args:
             params: 搜索参数
@@ -85,26 +85,38 @@ class LogService:
                 # 组装SQL
                 where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-                # 【修复】先获取所有符合条件的 request_id（按时间倒序）
+                # 【优化1】单独查询总数，使用 COUNT(DISTINCT) 而非加载全部数据
+                count_query = f"""
+                    SELECT COUNT(DISTINCT request_id) as total
+                    FROM logs
+                    WHERE {where_sql}
+                """
+                cursor.execute(count_query, query_params)
+                total = cursor.fetchone()['total']
+
+                if total == 0:
+                    conn.commit()
+                    return LogListResponse(
+                        total=0,
+                        page=params.page,
+                        page_size=params.page_size,
+                        data=[]
+                    )
+
+                # 【优化2】SQL层面分页，而非Python层面分页
+                offset = (params.page - 1) * params.page_size
                 request_id_query = f"""
-                    SELECT DISTINCT request_id, MIN(timestamp) as start_time
+                    SELECT request_id, MIN(timestamp) as start_time
                     FROM logs
                     WHERE {where_sql}
                     GROUP BY request_id
                     ORDER BY start_time DESC
+                    LIMIT ? OFFSET ?
                 """
-                cursor.execute(request_id_query, query_params)
-                all_request_ids = [row['request_id'] for row in cursor.fetchall()]
-
-                # 总数是分组数（不是记录数）
-                total = len(all_request_ids)
-
-                # 【修复】对分组结果进行分页
-                offset = (params.page - 1) * params.page_size
-                paged_request_ids = all_request_ids[offset:offset + params.page_size]
+                cursor.execute(request_id_query, query_params + [params.page_size, offset])
+                paged_request_ids = [row['request_id'] for row in cursor.fetchall()]
 
                 if not paged_request_ids:
-                    # 没有数据
                     conn.commit()
                     return LogListResponse(
                         total=total,
@@ -113,14 +125,14 @@ class LogService:
                         data=[]
                     )
 
-                # 【修复】获取这一页的所有日志记录
+                # 获取这一页的所有日志记录
                 placeholders = ','.join('?' * len(paged_request_ids))
                 data_query = f"""
                     SELECT * FROM logs
-                    WHERE {where_sql} AND request_id IN ({placeholders})
+                    WHERE request_id IN ({placeholders})
                     ORDER BY timestamp DESC
                 """
-                cursor.execute(data_query, query_params + paged_request_ids)
+                cursor.execute(data_query, paged_request_ids)
                 rows = cursor.fetchall()
 
                 # 转换为LogEntry
