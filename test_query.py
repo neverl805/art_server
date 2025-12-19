@@ -2,25 +2,35 @@
 import sys
 sys.path.insert(0, '.')
 
-from app.services.log_service_db import log_service
+from app.services.log_service_redis import log_service_redis as log_service
 from app.models.log import LogSearchParams
-from app.database.db import db_manager
+from app.database.redis_logger import redis_logger_manager
+import config
 
-print(f"[INFO] 数据库路径: {db_manager.db_path}")
+# 初始化Redis
+print("[INFO] 初始化Redis连接...")
+redis_logger_manager.initialize(
+    host=config.REDIS_HOST,
+    port=config.REDIS_PORT,
+    password=config.REDIS_PASSWORD,
+    db=config.REDIS_DB
+)
 
-# 测试直接数据库查询
-print("\n[TEST 1] 直接查询数据库:")
-with db_manager.get_connection() as conn:
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) as count FROM logs")
-    count = cursor.fetchone()['count']
-    print(f"  - logs 表总记录数: {count}")
+# 测试 Redis 连接
+print("\n[TEST 1] 测试Redis连接:")
+if redis_logger_manager.initialized:
+    print("  ✅ Redis连接成功")
+    # 获取日志数量
+    total_count = redis_logger_manager.redis_client.zcard('logs:timeline')
+    print(f"  - 日志总数: {total_count}")
 
-    cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 5")
-    rows = cursor.fetchall()
-    print(f"  - 最新5条记录:")
-    for row in rows:
-        print(f"    ID={row['id']}, timestamp={row['timestamp']}, level={row['level']}, request_id={row['request_id']}")
+    # 获取最近5条日志
+    recent_logs = redis_logger_manager.get_recent_logs(5)
+    print(f"  - 最近5条日志:")
+    for log in recent_logs:
+        print(f"    timestamp={log['timestamp']}, level={log['level']}, request_id={log['request_id']}")
+else:
+    print("  ❌ Redis未初始化")
 
 # 测试 search_logs 方法
 print("\n[TEST 2] 测试 search_logs 方法:")

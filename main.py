@@ -5,7 +5,20 @@ from fastapi.responses import JSONResponse
 from app.api import logs_router
 from app.logger import setup_logger, log_context
 from app.middleware import LoggingMiddleware
+from app.database.redis_logger import redis_logger_manager
 from typing import Any
+import config
+
+# 初始化Redis日志管理器
+try:
+    redis_logger_manager.initialize(
+        host=config.REDIS_HOST,
+        port=config.REDIS_PORT,
+        password=config.REDIS_PASSWORD,
+        db=config.REDIS_DB
+    )
+except Exception as e:
+    print(f"[WARNING] Redis初始化失败，日志将不会写入Redis: {e}")
 
 # 初始化日志系统
 setup_logger()

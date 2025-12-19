@@ -7,8 +7,8 @@ from app.models.log import (
     LogSearchParams, LogOverviewStats,
     LogListResponse, LogGroup, LogLevel
 )
-from app.services.log_service_db import log_service
-from app.database.db import db_manager
+from app.services.log_service_redis import log_service_redis as log_service
+from app.database.redis_logger import redis_logger_manager
 
 router = APIRouter(prefix="/api/logs", tags=["日志管理"])
 
@@ -174,12 +174,15 @@ async def clean_old_logs(days: int = Query(..., ge=0, description="保留最近N
     - days=30: 保留最近30天的日志，删除30天前的所有日志
     """
     try:
+        if not redis_logger_manager.initialized:
+            raise HTTPException(status_code=500, detail="Redis未初始化")
+
         # 清除所有日志
         if days == 0:
-            with db_manager.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT COUNT(*) as count FROM logs')
-                total_count = cursor.fetchone()['count']
+            # Redis中没有直接统计所有日志的方法，使用flushdb清空当前数据库
+            try:
+                # 获取当前日志数量（近似值）
+                total_count = redis_logger_manager.redis_client.zcard('logs:timeline')
 
                 if total_count == 0:
                     return CleanLogsResponse(
@@ -187,42 +190,25 @@ async def clean_old_logs(days: int = Query(..., ge=0, description="保留最近N
                         message="没有日志需要清除"
                     )
 
-                cursor.execute('DELETE FROM logs')
-                conn.commit()
-
-                # 执行VACUUM优化数据库文件大小
-                cursor.execute('VACUUM')
-                conn.commit()
+                # 清空当前数据库（谨慎使用！）
+                redis_logger_manager.redis_client.flushdb()
 
                 return CleanLogsResponse(
                     deleted_count=total_count,
-                    message=f"成功清除了所有日志，共{total_count}条"
+                    message=f"成功清除了所有日志，共约{total_count}条"
                 )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"清除所有日志失败: {str(e)}")
 
         # 清除N天前的日志
-        # 先统计要删除的数量
-        with db_manager.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT COUNT(*) as count
-                FROM logs
-                WHERE timestamp < datetime('now', '-' || ? || ' days')
-            ''', (days,))
-            deleted_count = cursor.fetchone()['count']
-
-        if deleted_count == 0:
-            return CleanLogsResponse(
-                deleted_count=0,
-                message=f"没有{days}天前的日志需要清除"
-            )
-
-        # 执行清理
-        db_manager.clean_old_logs(days)
+        redis_logger_manager.clean_old_logs(days)
 
         return CleanLogsResponse(
-            deleted_count=deleted_count,
-            message=f"成功清除了{deleted_count}条{days}天前的日志"
+            deleted_count=0,  # Redis的clean_old_logs会在内部打印删除数量
+            message=f"成功清除了{days}天前的日志"
         )
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         error_detail = f"清除日志失败: {str(e)}\n{traceback.format_exc()}"

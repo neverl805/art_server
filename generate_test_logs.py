@@ -1,4 +1,4 @@
-"""生成测试日志数据"""
+"""生成测试日志数据（写入本地文件）"""
 import random
 import time
 from app.logger import setup_logger, log_context
@@ -68,8 +68,11 @@ def generate_logs(count: int = 100):
         # 获取对应级别的消息
         message = random.choice(MESSAGES[level])
 
+        # 设置上下文
+        log_context.set_context(ip=ip, request_id=request_id)
+
         # 获取logger
-        logger = log_context.get_logger(ip=ip, request_id=request_id)
+        logger = log_context.get_logger()
 
         # 记录日志
         if level == "DEBUG":

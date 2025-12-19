@@ -1,13 +1,12 @@
-"""测试日志服务修复"""
+"""测试日志服务 - 本地文件版"""
 from app.logger import setup_logger, log_context
-from app.database.db import db_manager
 from loguru import logger
 
 print("=" * 60)
-print("测试日志服务修复")
+print("测试日志服务（本地文件版）")
 print("=" * 60)
 
-# 1. 测试日志配置
+# 1. 初始化日志系统
 print("\n1. 初始化日志系统...")
 setup_logger()
 
@@ -19,30 +18,21 @@ logger.error("这是一条ERROR日志")
 
 # 3. 测试带上下文的日志
 print("\n3. 测试带上下文的日志...")
-ctx_logger = log_context.get_logger(ip="192.168.1.100", request_id="test-001")
-ctx_logger.info("这是带上下文的日志")
+log_context.set_context(ip="192.168.1.100", request_id="test-001")
+logger.info("这是带上下文的日志")
 
-# 4. 测试数据库连接
-print("\n4. 测试数据库连接...")
-print(f"   数据库路径: {db_manager.db_path}")
-print(f"   数据库存在: {db_manager.db_path.exists()}")
-
-if db_manager.db_path.exists():
-    try:
-        with db_manager.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as count FROM logs")
-            result = cursor.fetchone()
-            print(f"   日志总数: {result['count']}")
-
-            cursor.execute("SELECT * FROM logs LIMIT 1")
-            sample = cursor.fetchone()
-            if sample:
-                print(f"   示例日志: {sample['message'][:50]}...")
-    except Exception as e:
-        print(f"   ❌ 数据库读取失败: {e}")
+# 4. 检查日志文件
+print("\n4. 检查日志文件...")
+from pathlib import Path
+log_dir = Path("logs_backup")
+if log_dir.exists():
+    print(f"   ✅ 日志目录存在: {log_dir.absolute()}")
+    log_files = list(log_dir.glob("*.log"))
+    print(f"   日志文件数: {len(log_files)}")
+    for f in log_files[:3]:
+        print(f"     - {f.name}")
 else:
-    print("   ⚠️  数据库文件不存在，请先运行 hcaptcha 服务生成日志")
+    print("   ⚠️  日志目录不存在")
 
 print("\n" + "=" * 60)
 print("测试完成！")

@@ -28,56 +28,87 @@ chmod +x quick_start.sh
 
 **注意：本系统已禁用登录功能，直接访问即可使用所有功能。**
 
-## 🆕 新特性：数据库日志存储
+## 🆕 系统架构：Redis日志查询系统
 
-### 传统方案的问题
+### 架构说明
 
-旧的文件日志方案存在以下问题：
-- ❌ 每次查询都要读取整个文件，性能差
-- ❌ 多文件切割导致日志难以聚合查询
-- ❌ 可能会有日志遗漏
-- ❌ 文件管理复杂
+本系统是一个**日志查询和可视化系统**，后端服务本身的日志存储在本地文件中，Redis用作日志查询数据源。
 
-### 新方案：数据库 + 文件备份
+```
+外部服务（如hcaptcha服务）
+    ↓ 写入日志
+Redis (日志数据源)
+    ↑ 查询日志
+本系统后端 (FastAPI)
+    ↓ 本地日志
+文件备份 (logs_backup/)
+```
+
+### 后端日志存储
+
+后端服务自身的日志（请求日志、错误日志等）：
 
 ```
 应用日志
     ↓
-Loguru (多sink配置)
-    ├─→ SQLite数据库 (主存储，用于查询)
+Loguru
     ├─→ 控制台输出 (开发调试)
     ├─→ 文件备份 (app_YYYY-MM-DD.log，保留7天)
     └─→ 错误日志 (error_YYYY-MM-DD.log，保留30天)
 ```
 
-### 优势对比
+### Redis作为查询数据源
 
-| 特性 | 旧方案(文件) | 新方案(数据库) |
-|------|-------------|---------------|
-| **查询性能** | ❌ 慢 | ✅ 快（索引查询） |
-| **多条件过滤** | ❌ 复杂 | ✅ 简单（SQL） |
-| **统计聚合** | ❌ 全量读取 | ✅ 高效聚合 |
-| **并发写入** | ❌ 可能丢失 | ✅ 事务保证 |
-| **文件管理** | ❌ 多文件混乱 | ✅ 自动清理 |
+Redis存储来自外部服务的日志数据，提供高性能查询：
 
-### 使用新日志系统
+**优势**:
+- ✅ 内存数据库，查询极快
+- ✅ 多维度索引（时间线、请求ID、级别、IP、模块）
+- ✅ Sorted Set高效范围查询
+- ✅ Pipeline批量操作
+- ✅ 自动过期机制（TTL 30天）
 
-详细文档请查看：[日志收集系统使用指南](LOGGING_GUIDE.md)
+### 使用日志系统
 
-#### 1. 在应用中记录日志
+#### 1. 后端服务记录日志（本地文件）
 
 ```python
 from app.logger.config import log_context
+from loguru import logger
 
-# 获取logger
-logger = log_context.get_logger(ip="192.168.1.1", request_id="abc123")
+# 设置上下文
+log_context.set_context(ip="192.168.1.1", request_id="abc123")
 
-# 记录日志
+# 获取logger（上下文会自动注入）
+logger = log_context.get_logger()
+
+# 记录日志（保存到本地文件）
 logger.info("用户登录成功")
 logger.error("数据库连接失败")
 ```
 
-#### 2. 查看日志统计
+#### 2. 外部服务写入日志到Redis
+
+外部服务（如hcaptcha服务）可以使用 `redis_logger_manager` 将日志写入Redis：
+
+```python
+from app.database.redis_logger import redis_logger_manager
+
+# 写入单条日志
+redis_logger_manager.insert_log({
+    'ip': '192.168.1.1',
+    'timestamp': '2024-01-01 12:00:00.000',
+    'request_id': 'req-001',
+    'level': 'INFO',
+    'module': 'main',
+    'function': 'process',
+    'line': 100,
+    'message': '处理完成',
+    'raw_line': '...'
+})
+```
+
+#### 3. 查看日志统计
 
 ```bash
 python manage_logs.py stats
@@ -160,14 +191,37 @@ cd E:\git_project\art_server
 pip install -r requirements.txt
 ```
 
-2. **启动后端服务**
+2. **配置Redis连接**
+
+编辑 `config.py` 文件，配置Redis连接信息：
+```python
+# Redis 配置
+REDIS_HOST = "localhost"    # Redis主机地址
+REDIS_PORT = 6379          # Redis端口
+REDIS_PASSWORD = None      # Redis密码（如果有）
+REDIS_DB = 0              # 数据库编号
+```
+
+3. **启动Redis服务**
+```bash
+# Windows (需要先安装Redis)
+redis-server
+
+# Linux
+sudo systemctl start redis
+
+# Docker
+docker run -d -p 6379:6379 redis:latest
+```
+
+4. **启动后端服务**
 ```bash
 python main.py
 ```
 
 后端服务将在 `http://localhost:8000` 启动
 
-3. **查看 API 文档**
+5. **查看 API 文档**
 访问 `http://localhost:8000/docs` 查看自动生成的 API 文档
 
 ### 前端启动
@@ -252,6 +306,8 @@ GET /api/logs/detail/{request_id}
 
 ### 后端
 - **FastAPI**: 现代、快速的 Web 框架
+- **Redis**: 高性能内存数据库，用于日志存储
+- **Loguru**: 强大的日志记录库
 - **Pydantic**: 数据验证和设置管理
 - **Uvicorn**: ASGI 服务器
 - **Python-dateutil**: 日期时间处理

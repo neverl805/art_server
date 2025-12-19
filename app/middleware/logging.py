@@ -25,8 +25,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         # 获取客户端IP
         client_ip = request.client.host if request.client else "unknown"
 
-        # 获取logger并绑定上下文
-        logger = log_context.get_logger(ip=client_ip, request_id=request_id)
+        # 设置上下文（使用 contextvars）
+        log_context.set_context(ip=client_ip, request_id=request_id)
+
+        # 获取logger（上下文会自动通过 patcher 注入）
+        logger = log_context.get_logger()
 
         # 记录请求开始
         logger.info(f"请求开始: {request.method} {request.url.path}")
