@@ -32,6 +32,16 @@ cp .env.example .env
 - `GET /api/logs/list`：按结果、host、IP、级别、时间和关键词查询 solve 请求。
 - `GET /api/logs/detail/{request_id}`：完整请求日志时间线。
 - `POST /api/logs/sync`：立即执行一次幂等增量同步。
+- `POST /api/logs/cleanup`：传入 `{ "confirm": true }`，清空可重建监控索引并执行 `VACUUM` 回收 SQLite 空间；原始日志、token 数据和当前文件采集进度保持不变。
+
+## 保留与清理
+
+- 监控索引默认保留 2 天，由 `MONITOR_RETENTION_DAYS` 控制；后台每次同步都会删除过期日志、请求和链路 span，并移除已经不存在的日志源状态。
+- hCaptcha 原始日志默认每天轮转、压缩为 zip 并保留 2 天，由 hCaptcha 服务的 `HCAPTCHA_LOG_ROTATION`、`HCAPTCHA_LOG_COMPRESSION` 和 `HCAPTCHA_LOG_RETENTION_DAYS` 控制。
+- 监控 API 自身的 `monitor_*.log` 每天轮转并保留 14 天。
+- 自动清理后的 SQLite 空闲页会继续复用，文件不一定立即变小；需要立即释放磁盘空间时，在监控首页点击清理按钮。
+
+监控链路没有 Redis 或常驻日志缓存。页面展示的“索引”包含 SQLite 主文件、WAL 和共享内存文件的磁盘占用；“源日志”是 hCaptcha 原始日志文件占用。
 
 ## 运维与测试
 

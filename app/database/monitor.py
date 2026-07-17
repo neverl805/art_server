@@ -89,6 +89,19 @@ class SyncResult:
     synced_at: datetime
     pruned: int = 0
     interrupted: int = 0
+    pruned_sources: int = 0
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    deleted_logs: int
+    deleted_requests: int
+    deleted_spans: int
+    source_records_preserved: int
+    database_bytes_before: int
+    database_bytes_after: int
+    reclaimed_bytes: int
+    cleaned_at: datetime
 
 
 class MonitorRepository:
@@ -283,10 +296,32 @@ class MonitorRepository:
                 ),
             )
 
+    def prune_source_states(self, active_paths: Iterable[str]) -> int:
+        """Remove ingestion offsets for source files that no longer exist."""
+
+        active = set(active_paths)
+        with self.connection() as connection:
+            stale = [
+                str(row["path"])
+                for row in connection.execute("SELECT path FROM ingest_sources")
+                if str(row["path"]) not in active
+            ]
+            connection.executemany(
+                "DELETE FROM ingest_sources WHERE path = ?",
+                ((path,) for path in stale),
+            )
+        return len(stale)
+
     def insert_entries(self, entries: Iterable[LogEntry], source: str) -> int:
         imported = 0
         with self.connection() as connection:
+            cutoff_row = connection.execute(
+                "SELECT value FROM monitor_state WHERE key = 'index_cutoff_epoch'"
+            ).fetchone()
+            cutoff_epoch = float(cutoff_row["value"]) if cutoff_row else 0.0
             for entry in entries:
+                if entry.timestamp.timestamp() <= cutoff_epoch:
+                    continue
                 fingerprint = hashlib.sha256(entry.raw_line.encode("utf-8")).hexdigest()
                 cursor = connection.execute(
                     """
@@ -642,6 +677,67 @@ class MonitorRepository:
             ).rowcount
         return int(logs or 0) + int(requests or 0)
 
+    def storage_bytes(self) -> int:
+        total = 0
+        for path in (
+            self.path,
+            Path(str(self.path) + "-wal"),
+            Path(str(self.path) + "-shm"),
+        ):
+            try:
+                total += path.stat().st_size
+            except FileNotFoundError:
+                pass
+        return total
+
+    def clear_index(self) -> CleanupResult:
+        """Clear derived rows while preserving source offsets and raw logs."""
+
+        before = self.storage_bytes()
+        cleaned_at = datetime.now()
+        cutoff_epoch = cleaned_at.timestamp()
+        with self.connection() as connection:
+            deleted_logs = int(
+                connection.execute("SELECT COUNT(*) FROM log_entries").fetchone()[0]
+            )
+            deleted_requests = int(
+                connection.execute("SELECT COUNT(*) FROM request_summaries").fetchone()[0]
+            )
+            deleted_spans = int(
+                connection.execute("SELECT COUNT(*) FROM request_spans").fetchone()[0]
+            )
+            source_records = int(
+                connection.execute("SELECT COUNT(*) FROM ingest_sources").fetchone()[0]
+            )
+            connection.execute("DELETE FROM log_entries")
+            connection.execute("DELETE FROM request_summaries")
+            connection.execute(
+                "DELETE FROM sqlite_sequence "
+                "WHERE name IN ('log_entries', 'request_spans')"
+            )
+            connection.execute(
+                """
+                INSERT INTO monitor_state(key, value) VALUES ('index_cutoff_epoch', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (str(cutoff_epoch),),
+            )
+
+        with self.connect() as connection:
+            connection.execute("VACUUM")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        after = self.storage_bytes()
+        return CleanupResult(
+            deleted_logs=deleted_logs,
+            deleted_requests=deleted_requests,
+            deleted_spans=deleted_spans,
+            source_records_preserved=source_records,
+            database_bytes_before=before,
+            database_bytes_after=after,
+            reclaimed_bytes=max(0, before - after),
+            cleaned_at=cleaned_at,
+        )
+
     def mark_stale_solve_requests(self, cutoff_epoch: float) -> int:
         with self.connection() as connection:
             cursor = connection.execute(
@@ -676,20 +772,31 @@ class LogIngestor:
             imported = 0
             parsed = 0
             failures = 0
-            files = self._source_files()
+            active_sources: set[str] = set()
+            files = self.source_files()
             for path in files:
                 if path.suffix == ".zip":
-                    result = self._sync_zip(path)
+                    result, source_keys = self._sync_zip(path)
+                    active_sources.update(source_keys)
                 else:
                     result = self._sync_log(path)
+                    active_sources.add(str(path.resolve()))
                 imported += result[0]
                 parsed += result[1]
                 failures += result[2]
+            pruned_sources = self.repository.prune_source_states(active_sources)
             synced_at = datetime.now()
             self.repository.set_last_sync(synced_at)
-            return SyncResult(imported, parsed, failures, len(files), synced_at)
+            return SyncResult(
+                imported,
+                parsed,
+                failures,
+                len(files),
+                synced_at,
+                pruned_sources=pruned_sources,
+            )
 
-    def _source_files(self) -> list[Path]:
+    def source_files(self) -> list[Path]:
         if not self.log_dir.is_dir():
             return []
         return sorted(
@@ -743,14 +850,18 @@ class LogIngestor:
         )
         return imported, parsed, failures
 
-    def _sync_zip(self, path: Path) -> tuple[int, int, int]:
+    def _sync_zip(
+        self, path: Path
+    ) -> tuple[tuple[int, int, int], set[str]]:
         stat = path.stat()
         imported = 0
         parsed = 0
         failures = 0
+        source_keys: set[str] = set()
         with zipfile.ZipFile(path) as archive:
             for member in archive.namelist():
                 key = f"zip://{path.resolve()}!{member}"
+                source_keys.add(key)
                 state = self.repository.source_state(key)
                 if (
                     state is not None
@@ -780,4 +891,4 @@ class LogIngestor:
                     complete=True,
                     parse_failures=member_failures,
                 )
-        return imported, parsed, failures
+        return (imported, parsed, failures), source_keys

@@ -281,6 +281,16 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(appended.imported, 1)
         self.assertEqual(repeated.imported, 0)
 
+        archive = self.log_dir / "application_previous.log.zip"
+        archive_key = f"zip://{archive.resolve()}!application_previous.log"
+        self.assertIsNotNone(self.service.repository.source_state(archive_key))
+        archive.unlink()
+
+        pruned = self.service.sync()
+
+        self.assertEqual(pruned.pruned_sources, 1)
+        self.assertIsNone(self.service.repository.source_state(archive_key))
+
     def test_search_and_detail_expose_hcaptcha_fields(self) -> None:
         self.service.sync()
 
@@ -357,6 +367,51 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(detail.outcome, RequestOutcome.FAILURE)
         self.assertEqual(detail.error, "request interrupted before completion")
 
+    def test_manual_cleanup_reclaims_index_and_only_accepts_new_logs(self) -> None:
+        self.service.sync()
+
+        result = self.service.clear_index()
+
+        self.assertGreater(result.deleted_logs, 0)
+        self.assertGreater(result.deleted_requests, 0)
+        self.assertGreater(result.source_records_preserved, 0)
+        self.assertGreater(result.database_bytes_after, 0)
+        self.assertEqual(
+            result.reclaimed_bytes,
+            max(0, result.database_bytes_before - result.database_bytes_after),
+        )
+        self.assertIsNone(self.service.get_request_detail("success-request"))
+
+        old = datetime.now() - timedelta(minutes=10)
+        with zipfile.ZipFile(
+            self.log_dir / "application_replayed.log.zip", "w"
+        ) as bundle:
+            bundle.writestr(
+                "application_replayed.log",
+                log_line(
+                    old,
+                    "INFO",
+                    "replayed-request",
+                    "request started method=POST path=/get_hcaptcha_key",
+                ),
+            )
+        with (self.log_dir / "application_current.log").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                log_line(
+                    datetime.now() + timedelta(milliseconds=10),
+                    "INFO",
+                    "new-request",
+                    "request started method=POST path=/get_hcaptcha_key",
+                )
+            )
+
+        self.service.sync()
+
+        self.assertIsNone(self.service.get_request_detail("replayed-request"))
+        self.assertIsNotNone(self.service.get_request_detail("new-request"))
+
     def test_api_contract_wraps_monitor_data(self) -> None:
         settings = Settings(
             hcaptcha_root=self.root,
@@ -373,6 +428,11 @@ class MonitorTest(unittest.TestCase):
                 "/api/logs/fingerprint-clusters"
                 "?hours=24&dimensions=profile_variant,proxy_country"
             )
+            rejected_cleanup = client.post(
+                "/api/logs/cleanup", json={"confirm": False}
+            )
+            cleanup = client.post("/api/logs/cleanup", json={"confirm": True})
+            empty_overview = client.get("/api/logs/overview?hours=24")
 
         self.assertEqual(overview.status_code, 200)
         self.assertEqual(overview.json()["data"]["solve_total"], 2)
@@ -380,6 +440,10 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(detail.json()["data"]["target_host"], "example.net")
         self.assertEqual(clusters.status_code, 200)
         self.assertEqual(clusters.json()["data"]["covered_samples"], 2)
+        self.assertEqual(rejected_cleanup.status_code, 422)
+        self.assertEqual(cleanup.status_code, 200)
+        self.assertGreater(cleanup.json()["data"]["deleted_total"], 0)
+        self.assertEqual(empty_overview.json()["data"]["solve_total"], 0)
 
 
 if __name__ == "__main__":

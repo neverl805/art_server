@@ -6,12 +6,17 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from app.models.log import LogLevel, LogSearchParams, RequestOutcome
 from app.services.monitor_service import MonitorService
 
 
 router = APIRouter(prefix="/api/logs", tags=["hCaptcha monitor"])
+
+
+class CleanupRequest(BaseModel):
+    confirm: bool = False
 
 
 def _service(request: Request) -> MonitorService:
@@ -108,7 +113,30 @@ def sync_logs(request: Request) -> dict[str, Any]:
             "parse_failures": result.parse_failures,
             "source_files": result.source_files,
             "pruned": result.pruned,
+            "pruned_sources": result.pruned_sources,
             "interrupted": result.interrupted,
             "synced_at": result.synced_at.isoformat(timespec="milliseconds"),
+        }
+    )
+
+
+@router.post("/cleanup", summary="Clear the derived log index and reclaim space")
+def cleanup_logs(payload: CleanupRequest, request: Request) -> dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(status_code=422, detail="cleanup confirmation is required")
+    result = _service(request).clear_index()
+    return _success(
+        {
+            "deleted_logs": result.deleted_logs,
+            "deleted_requests": result.deleted_requests,
+            "deleted_spans": result.deleted_spans,
+            "deleted_total": (
+                result.deleted_logs + result.deleted_requests + result.deleted_spans
+            ),
+            "source_records_preserved": result.source_records_preserved,
+            "database_bytes_before": result.database_bytes_before,
+            "database_bytes_after": result.database_bytes_after,
+            "reclaimed_bytes": result.reclaimed_bytes,
+            "cleaned_at": result.cleaned_at.isoformat(timespec="milliseconds"),
         }
     )

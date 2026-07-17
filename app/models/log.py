@@ -190,6 +190,9 @@ class SourceStatus(BaseModel):
     source_files: int
     indexed_logs: int
     parse_failures: int
+    retention_days: int
+    source_bytes: int
+    database_bytes: int
     latest_log_at: datetime | None = None
     last_sync_at: datetime | None = None
 

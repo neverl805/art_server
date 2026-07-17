@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -15,7 +16,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.database.monitor import LogIngestor, MonitorRepository, SOLVE_PATHS, SyncResult
+from app.database.monitor import (
+    CleanupResult,
+    LogIngestor,
+    MonitorRepository,
+    SOLVE_PATHS,
+    SyncResult,
+)
 from app.models.log import (
     ClientStat,
     FingerprintCluster,
@@ -76,24 +83,31 @@ class MonitorService:
         self.stale_request_seconds = max(30, stale_request_seconds)
         self.repository = MonitorRepository(monitor_database)
         self.ingestor = LogIngestor(log_dir, self.repository)
+        self._sync_lock = threading.Lock()
 
     def sync(self) -> SyncResult:
-        result = self.ingestor.sync()
-        interrupted = self.repository.mark_stale_solve_requests(
-            time.time() - self.stale_request_seconds
-        )
-        pruned = self.repository.prune_before(
-            time.time() - self.retention_days * 24 * 60 * 60
-        )
-        return SyncResult(
-            imported=result.imported,
-            parsed=result.parsed,
-            parse_failures=result.parse_failures,
-            source_files=result.source_files,
-            synced_at=result.synced_at,
-            pruned=pruned,
-            interrupted=interrupted,
-        )
+        with self._sync_lock:
+            result = self.ingestor.sync()
+            interrupted = self.repository.mark_stale_solve_requests(
+                time.time() - self.stale_request_seconds
+            )
+            pruned = self.repository.prune_before(
+                time.time() - self.retention_days * 24 * 60 * 60
+            )
+            return SyncResult(
+                imported=result.imported,
+                parsed=result.parsed,
+                parse_failures=result.parse_failures,
+                source_files=result.source_files,
+                synced_at=result.synced_at,
+                pruned=pruned,
+                interrupted=interrupted,
+                pruned_sources=result.pruned_sources,
+            )
+
+    def clear_index(self) -> CleanupResult:
+        with self._sync_lock:
+            return self.repository.clear_index()
 
     def get_overview(self, hours: int = 24) -> LogOverviewStats:
         self.sync()
@@ -397,10 +411,17 @@ class MonitorService:
         )
 
     def get_source_status(self) -> SourceStatus:
+        source_files = self.ingestor.source_files()
+        source_bytes = 0
+        for path in source_files:
+            try:
+                source_bytes += path.stat().st_size
+            except FileNotFoundError:
+                pass
         with self.repository.connection() as connection:
             source = connection.execute(
                 """
-                SELECT COUNT(*) AS files, COALESCE(SUM(parse_failures), 0) AS failures
+                SELECT COALESCE(SUM(parse_failures), 0) AS failures
                 FROM ingest_sources
                 """
             ).fetchone()
@@ -413,9 +434,12 @@ class MonitorService:
         return SourceStatus(
             log_dir=str(self.log_dir),
             database_path=str(self.repository.path),
-            source_files=int(source["files"]),
+            source_files=len(source_files),
             indexed_logs=int(logs["count"]),
             parse_failures=int(source["failures"]),
+            retention_days=self.retention_days,
+            source_bytes=source_bytes,
+            database_bytes=self.repository.storage_bytes(),
             latest_log_at=datetime.fromisoformat(logs["latest"]) if logs["latest"] else None,
             last_sync_at=datetime.fromisoformat(state["value"]) if state else None,
         )
