@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
 from contextlib import closing
@@ -63,6 +64,13 @@ CLUSTER_DIMENSIONS = {
 }
 
 
+class TokenAdminError(Exception):
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
 class MonitorService:
     def __init__(
         self,
@@ -71,6 +79,7 @@ class MonitorService:
         monitor_database: Path,
         service_database: Path,
         service_url: str,
+        service_admin_secret: str = "",
         probe_timeout_seconds: float = 1,
         retention_days: int = 2,
         stale_request_seconds: int = 240,
@@ -78,6 +87,7 @@ class MonitorService:
         self.log_dir = log_dir
         self.service_database = service_database
         self.service_url = service_url
+        self.service_admin_secret = service_admin_secret
         self.probe_timeout_seconds = probe_timeout_seconds
         self.retention_days = max(1, retention_days)
         self.stale_request_seconds = max(30, stale_request_seconds)
@@ -108,6 +118,83 @@ class MonitorService:
     def clear_index(self) -> CleanupResult:
         with self._sync_lock:
             return self.repository.clear_index()
+
+    def _token_admin_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        if not self.service_admin_secret:
+            raise TokenAdminError(503, "token administration is not configured")
+        body = (
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            if payload is not None
+            else None
+        )
+        request = urllib.request.Request(
+            f"{self.service_url}{path}",
+            data=body,
+            method=method,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Admin-Secret": self.service_admin_secret,
+            },
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=max(2, self.probe_timeout_seconds)
+            ) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            try:
+                result = json.loads(error.read().decode("utf-8"))
+                message = str(
+                    result.get("message")
+                    or result.get("detail")
+                    or f"hCaptcha service returned HTTP {error.code}"
+                )
+            except (ValueError, UnicodeDecodeError):
+                message = f"hCaptcha service returned HTTP {error.code}"
+            raise TokenAdminError(error.code, message) from error
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            raise TokenAdminError(
+                503, f"hCaptcha service is unavailable: {error}"
+            ) from error
+        if not isinstance(result, dict) or result.get("code") != 200:
+            raise TokenAdminError(502, "hCaptcha service returned an invalid response")
+        return result.get("data")
+
+    def list_token_records(self) -> dict[str, Any]:
+        data = self._token_admin_request("GET", "/admin/tokens")
+        if not isinstance(data, dict):
+            raise TokenAdminError(502, "hCaptcha service returned invalid token data")
+        return data
+
+    def create_token_record(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = self._token_admin_request("POST", "/admin/tokens", payload)
+        if not isinstance(data, dict):
+            raise TokenAdminError(502, "hCaptcha service returned invalid token data")
+        return data
+
+    def update_token_record(
+        self, token_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        safe_id = urllib.parse.quote(token_id, safe="")
+        data = self._token_admin_request(
+            "PATCH", f"/admin/tokens/{safe_id}", payload
+        )
+        if not isinstance(data, dict):
+            raise TokenAdminError(502, "hCaptcha service returned invalid token data")
+        return data
+
+    def delete_token_record(self, token_id: str) -> dict[str, Any]:
+        safe_id = urllib.parse.quote(token_id, safe="")
+        data = self._token_admin_request("DELETE", f"/admin/tokens/{safe_id}")
+        if not isinstance(data, dict):
+            raise TokenAdminError(502, "hCaptcha service returned invalid token data")
+        return data
 
     def get_overview(self, hours: int = 24) -> LogOverviewStats:
         self.sync()

@@ -2,7 +2,7 @@
 
 ## Decision
 
-Use the hCaptcha service's Loguru files as the immutable source, a local SQLite database as a rebuildable query index, and the existing token SQLite database as a read-only secondary source. The Vue client polls the FastAPI monitor every 10 seconds. No queue or cache sits between the service and monitor.
+Use the hCaptcha service's Loguru files as the immutable source, a local SQLite database as a rebuildable query index, and the existing token SQLite database as a read-only secondary source for overview queries. The Vue client polls the FastAPI monitor every 10 seconds. No queue or cache sits between the service and monitor.
 
 This fits the current deployment: one hCaptcha process, one monitor process, one host, modest retention, and request-oriented queries. Redis previously duplicated durable data in memory and required producers to know the monitor's storage schema.
 
@@ -13,8 +13,9 @@ This fits the current deployment: one hCaptcha process, one monitor process, one
 3. The parser extracts request/session/IP context and typed lifecycle events such as `solve_succeeded`, `solve_failed`, and `token_committed`.
 4. `MonitorRepository` writes raw entries and request summaries to `data/monitor.db` in SQLite WAL mode.
 5. API queries join derived metrics with a read-only aggregate of `hcaptcha/data/service.db` and a bounded `/health` probe.
+6. Token CRUD requests pass through the monitor to the hCaptcha `/admin/tokens` API, so the service's transactional `TokenStore` remains the only ledger writer.
 
-The monitor never writes the hCaptcha token ledger or removes source logs. Its index can be deleted and rebuilt.
+The monitor never opens the hCaptcha token ledger for writing or removes source logs. Its index can be deleted and rebuilt.
 
 ## Rationale
 

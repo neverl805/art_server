@@ -40,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         monitor_database=config.monitor_database,
         service_database=config.service_database,
         service_url=config.service_url,
+        service_admin_secret=config.service_admin_secret,
         probe_timeout_seconds=config.service_probe_timeout_seconds,
         retention_days=config.retention_days,
         stale_request_seconds=config.stale_request_seconds,
@@ -79,7 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(config.cors_origins),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 

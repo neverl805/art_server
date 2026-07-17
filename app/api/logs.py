@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.log import LogLevel, LogSearchParams, RequestOutcome
-from app.services.monitor_service import MonitorService
+from app.services.monitor_service import MonitorService, TokenAdminError
 
 
 router = APIRouter(prefix="/api/logs", tags=["hCaptcha monitor"])
@@ -17,6 +17,26 @@ router = APIRouter(prefix="/api/logs", tags=["hCaptcha monitor"])
 
 class CleanupRequest(BaseModel):
     confirm: bool = False
+
+
+class TokenCreateRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+    remaining: int = Field(ge=0, le=1_000_000_000)
+    enabled: bool = True
+    expires_at: float | None = Field(default=None, ge=0)
+
+
+class TokenUpdateRequest(BaseModel):
+    remaining: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    used: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    enabled: bool | None = None
+    expires_at: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def require_change(self) -> "TokenUpdateRequest":
+        if not self.model_fields_set:
+            raise ValueError("at least one token field is required")
+        return self
 
 
 def _service(request: Request) -> MonitorService:
@@ -27,6 +47,13 @@ def _success(data: Any) -> dict[str, Any]:
     if hasattr(data, "model_dump"):
         data = data.model_dump(mode="json")
     return {"code": 200, "msg": "success", "data": data}
+
+
+def _token_result(operation: Callable[[], Any]) -> dict[str, Any]:
+    try:
+        return _success(operation())
+    except TokenAdminError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.message) from error
 
 
 @router.get("/overview", summary="Get hCaptcha service overview")
@@ -140,3 +167,37 @@ def cleanup_logs(payload: CleanupRequest, request: Request) -> dict[str, Any]:
             "cleaned_at": result.cleaned_at.isoformat(timespec="milliseconds"),
         }
     )
+
+
+@router.get("/tokens", summary="List live SQLite token records")
+def list_tokens(request: Request) -> dict[str, Any]:
+    return _token_result(_service(request).list_token_records)
+
+
+@router.post("/tokens", summary="Create or reset a SQLite token record")
+def create_token(payload: TokenCreateRequest, request: Request) -> dict[str, Any]:
+    return _token_result(
+        lambda: _service(request).create_token_record(
+            payload.model_dump(mode="json")
+        )
+    )
+
+
+@router.patch("/tokens/{token_id}", summary="Update a SQLite token record")
+def update_token(
+    token_id: str, payload: TokenUpdateRequest, request: Request
+) -> dict[str, Any]:
+    return _token_result(
+        lambda: _service(request).update_token_record(
+            token_id,
+            payload.model_dump(
+                mode="json",
+                exclude_unset=True,
+            ),
+        )
+    )
+
+
+@router.delete("/tokens/{token_id}", summary="Delete a SQLite token record")
+def delete_token(token_id: str, request: Request) -> dict[str, Any]:
+    return _token_result(lambda: _service(request).delete_token_record(token_id))

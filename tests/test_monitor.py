@@ -8,6 +8,7 @@ import zipfile
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
@@ -444,6 +445,74 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(cleanup.status_code, 200)
         self.assertGreater(cleanup.json()["data"]["deleted_total"], 0)
         self.assertEqual(empty_overview.json()["data"]["solve_total"], 0)
+
+    def test_token_admin_api_proxies_live_ledger_operations(self) -> None:
+        settings = Settings(
+            hcaptcha_root=self.root,
+            monitor_database=self.monitor_database,
+            sync_interval_seconds=60,
+            service_url="http://127.0.0.1:9",
+            service_admin_secret="admin-secret",
+            service_probe_timeout_seconds=0.05,
+        )
+        app = create_app(settings)
+        record = {
+            "token_id": "a" * 64,
+            "token_hint": "***oken",
+            "remaining": 20,
+            "used": 3,
+            "pending": 0,
+            "enabled": True,
+            "expires_at": None,
+            "created_at": 1,
+            "updated_at": 2,
+        }
+        app.state.monitor.list_token_records = Mock(
+            return_value={
+                "total": 1,
+                "remaining": 20,
+                "used": 3,
+                "pending": 0,
+                "tokens": [record],
+            }
+        )
+        app.state.monitor.create_token_record = Mock(return_value=record)
+        app.state.monitor.update_token_record = Mock(return_value=record)
+        app.state.monitor.delete_token_record = Mock(return_value=record)
+
+        with TestClient(app) as client:
+            listing = client.get("/api/logs/tokens")
+            created = client.post(
+                "/api/logs/tokens",
+                json={
+                    "token": "raw-token",
+                    "remaining": 20,
+                    "enabled": True,
+                    "expires_at": None,
+                },
+            )
+            updated = client.patch(
+                f"/api/logs/tokens/{record['token_id']}",
+                json={"remaining": 20, "enabled": False},
+            )
+            deleted = client.delete(f"/api/logs/tokens/{record['token_id']}")
+
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(listing.json()["data"]["total"], 1)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        app.state.monitor.create_token_record.assert_called_once_with(
+            {
+                "token": "raw-token",
+                "remaining": 20,
+                "enabled": True,
+                "expires_at": None,
+            }
+        )
+        app.state.monitor.update_token_record.assert_called_once_with(
+            record["token_id"], {"remaining": 20, "enabled": False}
+        )
 
 
 if __name__ == "__main__":
