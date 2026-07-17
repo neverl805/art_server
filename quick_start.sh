@@ -1,23 +1,13 @@
-#!/bin/bash
+#!/bin/sh
+set -eu
 
-echo "================================"
-echo "   日志系统快速启动脚本"
-echo "================================"
-echo ""
-
-# 1. 生成测试日志
-echo "🔨 生成测试日志数据..."
-python generate_test_logs.py --count 200
-echo ""
-
-# 2. 查看日志统计
-echo "📊 查看日志统计..."
-python manage_logs.py stats
-echo ""
-
-# 3. 启动服务器
-echo "🚀 启动FastAPI服务器..."
-echo "访问 http://localhost:8000/docs 查看API文档"
-echo "访问前端页面查看日志可视化界面"
-echo ""
-python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$ROOT"
+if [ -f .env ]; then
+    set -a
+    . ./.env
+    set +a
+fi
+python -m pip install -r requirements.txt
+python manage_logs.py sync
+exec python -m uvicorn main:app --host "${MONITOR_HOST:-127.0.0.1}" --port "${MONITOR_PORT:-8000}" --no-access-log

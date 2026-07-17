@@ -1,4 +1,5 @@
-"""日志模块"""
-from app.logger.config import setup_logger, log_context
+"""Monitor API logging."""
 
-__all__ = ['setup_logger', 'log_context']
+from app.logger.config import setup_logger
+
+__all__ = ["setup_logger"]
