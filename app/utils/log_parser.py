@@ -20,6 +20,14 @@ class LogParser:
 
     EVENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         (
+            "request_payload",
+            re.compile(r"^request payload=(?P<payload>\{.*\})$"),
+        ),
+        (
+            "response_payload",
+            re.compile(r"^response payload=(?P<payload>\{.*\})$"),
+        ),
+        (
             "hcaptcha_trace",
             re.compile(r"^hCaptcha trace payload=(?P<payload>\{.*\})$"),
         ),

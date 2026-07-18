@@ -108,6 +108,10 @@ def trace_message(*, country: str, profile: str, success: bool) -> str:
     return "hCaptcha trace payload=" + json.dumps(payload, separators=(",", ":"))
 
 
+def payload_message(event: str, payload: dict[str, object]) -> str:
+    return f"{event} payload=" + json.dumps(payload, separators=(",", ":"))
+
+
 class MonitorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -141,6 +145,26 @@ class MonitorTest(unittest.TestCase):
                 "request started method=POST path=/get_hcaptcha_key",
             ),
             log_line(
+                started + timedelta(milliseconds=1),
+                "INFO",
+                "success-request",
+                payload_message(
+                    "request",
+                    {
+                        "method": "POST",
+                        "path": "/get_hcaptcha_key",
+                        "headers": {"x-client": "fixture"},
+                        "body": {
+                            "token": "full-api-token",
+                            "proxies": "http://user:password@gateway.fixture:8000",
+                            "sitekey": "fixture-sitekey",
+                            "url": "https://example.com/form",
+                            "page_html": "<html>fixture</html>",
+                        },
+                    },
+                ),
+            ),
+            log_line(
                 started + timedelta(seconds=1),
                 "INFO",
                 "success-request",
@@ -172,6 +196,21 @@ class MonitorTest(unittest.TestCase):
                 "token usage committed hint=***oken remaining=9 used=1",
             ),
             log_line(
+                started + timedelta(seconds=2, milliseconds=15),
+                "INFO",
+                "success-request",
+                payload_message(
+                    "response",
+                    {
+                        "status": 200,
+                        "body": {
+                            "code": 200,
+                            "Captcha_n": "full-captcha-token",
+                        },
+                    },
+                ),
+            ),
+            log_line(
                 started + timedelta(seconds=2, milliseconds=20),
                 "INFO",
                 "success-request",
@@ -190,6 +229,25 @@ class MonitorTest(unittest.TestCase):
                 "INFO",
                 "failure-request",
                 "request started method=POST path=/v1/hcaptcha/solve",
+            ),
+            log_line(
+                failed + timedelta(milliseconds=1),
+                "INFO",
+                "failure-request",
+                payload_message(
+                    "request",
+                    {
+                        "method": "POST",
+                        "path": "/v1/hcaptcha/solve",
+                        "headers": {"x-client": "fixture"},
+                        "body": {
+                            "token": "full-api-token",
+                            "proxies": "http://user:password@gateway.fixture:8000",
+                            "sitekey": "fixture-sitekey",
+                            "url": "https://example.net/form",
+                        },
+                    },
+                ),
             ),
             log_line(
                 failed + timedelta(seconds=1),
@@ -222,6 +280,18 @@ class MonitorTest(unittest.TestCase):
                 "failure-request",
                 "token usage refunded hint=***oken "
                 "remaining=10 error=fixture timeout",
+            ),
+            log_line(
+                failed + timedelta(seconds=3, milliseconds=15),
+                "INFO",
+                "failure-request",
+                payload_message(
+                    "response",
+                    {
+                        "status": 502,
+                        "body": {"code": 400, "message": "fixture timeout"},
+                    },
+                ),
             ),
             log_line(
                 failed + timedelta(seconds=3, milliseconds=20),
@@ -262,7 +332,7 @@ class MonitorTest(unittest.TestCase):
         first = self.service.sync()
         second = self.service.sync()
 
-        self.assertEqual(first.imported, 14)
+        self.assertEqual(first.imported, 18)
         self.assertEqual(second.imported, 0)
         overview = self.service.get_overview(24)
         self.assertEqual(overview.solve_total, 2)
@@ -312,12 +382,27 @@ class MonitorTest(unittest.TestCase):
         assert detail is not None
         self.assertEqual(detail.outcome, RequestOutcome.FAILURE)
         self.assertEqual(detail.error, "fixture timeout")
-        self.assertEqual(len(detail.logs), 7)
+        self.assertEqual(len(detail.logs), 9)
         self.assertEqual(len(detail.spans), 4)
         self.assertEqual(detail.spans[1].name, "getcaptcha")
         self.assertEqual(detail.trace_metrics.http_total_ms, 1200)
         self.assertEqual(detail.trace_metrics.queue_wait_ms, 45.25)
         self.assertEqual(detail.fingerprint.proxy_country, "DE")
+        request_log = next(
+            entry for entry in detail.logs if entry.event == "request_payload"
+        )
+        response_log = next(
+            entry for entry in detail.logs if entry.event == "response_payload"
+        )
+        self.assertEqual(
+            request_log.attributes["payload"]["body"]["proxies"],
+            "http://user:password@gateway.fixture:8000",
+        )
+        self.assertEqual(
+            request_log.attributes["payload"]["body"]["token"],
+            "full-api-token",
+        )
+        self.assertEqual(response_log.attributes["payload"]["status"], 502)
 
         clusters = self.service.get_fingerprint_clusters(
             hours=24,
