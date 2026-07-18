@@ -240,14 +240,19 @@ class MonitorTest(unittest.TestCase):
             connection.executescript(
                 """
                 CREATE TABLE api_tokens (
-                    token_hash TEXT PRIMARY KEY, token_hint TEXT, remaining INTEGER,
-                    used INTEGER, enabled INTEGER, expires_at REAL, created_at REAL
+                    token_hash TEXT PRIMARY KEY, token_value TEXT, token_hint TEXT,
+                    remaining INTEGER, used INTEGER, enabled INTEGER,
+                    expires_at REAL, created_at REAL
                 );
                 CREATE TABLE token_reservations (
                     reservation_id TEXT PRIMARY KEY, token_hash TEXT, status TEXT
                 );
-                INSERT INTO api_tokens VALUES ('hash', '***oken', 10, 2, 1, NULL, 1);
-                INSERT INTO api_tokens VALUES ('disabled', '***abled', 72, 8, 0, NULL, 2);
+                INSERT INTO api_tokens VALUES (
+                    'hash', 'full-token', '***oken', 10, 2, 1, NULL, 1
+                );
+                INSERT INTO api_tokens VALUES (
+                    'disabled', 'disabled-token', '***abled', 72, 8, 0, NULL, 2
+                );
                 INSERT INTO token_reservations VALUES ('reservation', 'hash', 'pending');
                 """
             )
@@ -266,6 +271,7 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(overview.success_rate, 50)
         self.assertEqual(overview.token_usage.remaining, 10)
         self.assertEqual(overview.token_usage.pending, 1)
+        self.assertEqual(overview.token_usage.tokens[0].token, "full-token")
 
         active_log = self.log_dir / "application_current.log"
         with active_log.open("a", encoding="utf-8") as handle:
@@ -458,6 +464,7 @@ class MonitorTest(unittest.TestCase):
         app = create_app(settings)
         record = {
             "token_id": "a" * 64,
+            "token": "full-token",
             "token_hint": "***oken",
             "remaining": 20,
             "used": 3,
@@ -499,6 +506,7 @@ class MonitorTest(unittest.TestCase):
 
         self.assertEqual(listing.status_code, 200)
         self.assertEqual(listing.json()["data"]["total"], 1)
+        self.assertEqual(listing.json()["data"]["tokens"][0]["token"], "full-token")
         self.assertEqual(created.status_code, 200)
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(deleted.status_code, 200)

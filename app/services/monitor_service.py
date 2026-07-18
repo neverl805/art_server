@@ -461,7 +461,8 @@ class MonitorService:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(
                     """
-                    SELECT t.token_hint, t.remaining, t.used, t.enabled, t.expires_at,
+                    SELECT t.token_value, t.token_hint, t.remaining, t.used,
+                           t.enabled, t.expires_at,
                            COUNT(r.reservation_id) AS pending
                     FROM api_tokens t
                     LEFT JOIN token_reservations r
@@ -473,6 +474,11 @@ class MonitorService:
             return TokenUsage(available=False)
         tokens = [
             TokenState(
+                token=(
+                    str(row["token_value"])
+                    if row["token_value"] is not None
+                    else None
+                ),
                 token_hint=str(row["token_hint"]),
                 remaining=int(row["remaining"]),
                 used=int(row["used"]),

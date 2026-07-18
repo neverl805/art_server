@@ -168,6 +168,7 @@ class ClientStat(BaseModel):
 
 
 class TokenState(BaseModel):
+    token: str | None = None
     token_hint: str
     remaining: int
     used: int

@@ -34,7 +34,7 @@ cp .env.example .env
 - `GET /api/logs/detail/{request_id}`：完整请求日志时间线。
 - `POST /api/logs/sync`：立即执行一次幂等增量同步。
 - `POST /api/logs/cleanup`：传入 `{ "confirm": true }`，清空可重建监控索引并执行 `VACUUM` 回收 SQLite 空间；原始日志、token 数据和当前文件采集进度保持不变。
-- `GET /api/logs/tokens`：实时读取完整 Token 账本统计和掩码记录。
+- `GET /api/logs/tokens`：实时读取完整 Token 账本统计和原值记录。
 - `POST /api/logs/tokens`：新建或重置 Token。
 - `PATCH /api/logs/tokens/{token_id}`：更新次数、状态和过期时间。
 - `DELETE /api/logs/tokens/{token_id}`：删除没有进行中预留的 Token。
