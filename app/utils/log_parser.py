@@ -99,9 +99,65 @@ class LogParser:
         ("service_stopped", re.compile(r"^service stopped$")),
     )
 
+    # Events whose whole body the service ships as one object. The prose format
+    # carried it as a JSON blob inside the message, so downstream code reads it
+    # from attributes["payload"]; keep that shape for both formats.
+    PAYLOAD_EVENTS = frozenset(
+        {"request_payload", "response_payload", "hcaptcha_trace"}
+    )
+
     @classmethod
     def parse_line(cls, line: str) -> LogEntry | None:
+        """Parse one log line, in either the JSONL or the legacy prose format.
+
+        JSONL is what the service writes now: the fields arrive as fields, so
+        rewording a log message can no longer break ingestion. The prose branch
+        stays because the archived .log.zip files on disk predate the change and
+        must remain re-ingestable.
+        """
+
         raw_line = line.rstrip("\r\n")
+        if raw_line.startswith("{"):
+            return cls._parse_jsonl(raw_line)
+        return cls._parse_prose(raw_line)
+
+    @classmethod
+    def _parse_jsonl(cls, raw_line: str) -> LogEntry | None:
+        try:
+            record = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(record, dict) or "event" not in record:
+            return None
+        try:
+            timestamp = datetime.fromisoformat(str(record["ts"]))
+        except (KeyError, ValueError):
+            return None
+        try:
+            level = LogLevel(str(record.get("level")))
+        except ValueError:
+            level = LogLevel.INFO
+        event = str(record["event"])
+        data = record.get("data")
+        data = data if isinstance(data, dict) else {}
+        attributes = {"payload": data} if event in cls.PAYLOAD_EVENTS else dict(data)
+        return LogEntry(
+            ip=str(record.get("ip", "127.0.0.1")),
+            session_id=str(record.get("session_id", "SYSTEM")),
+            timestamp=timestamp.replace(tzinfo=None),
+            request_id=str(record.get("request_id", "SYSTEM")),
+            level=level,
+            module=str(record.get("module", "")),
+            function=str(record.get("function", "")),
+            line=int(record.get("line") or 0),
+            event=event,
+            message=str(record.get("message", "")),
+            attributes=attributes,
+            raw_line=raw_line,
+        )
+
+    @classmethod
+    def _parse_prose(cls, raw_line: str) -> LogEntry | None:
         match = cls.LOG_PATTERN.match(raw_line)
         if match is None:
             return None

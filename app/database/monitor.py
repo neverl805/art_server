@@ -801,6 +801,10 @@ class LogIngestor:
             return []
         return sorted(
             [
+                # Current format, one file per service worker.
+                *self.log_dir.glob("events_*.jsonl"),
+                *self.log_dir.glob("events_*.jsonl.zip"),
+                # Legacy prose files and their archives.
                 *self.log_dir.glob("application_*.log"),
                 *self.log_dir.glob("application_*.log.zip"),
             ]
