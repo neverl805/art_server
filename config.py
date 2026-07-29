@@ -34,7 +34,12 @@ class Settings:
     sync_interval_seconds: float = float(
         os.getenv("MONITOR_SYNC_INTERVAL_SECONDS", "2")
     )
-    retention_days: int = int(os.getenv("MONITOR_RETENTION_DAYS", "2"))
+    retention_days: int = int(os.getenv("MONITOR_RETENTION_DAYS", "1"))
+    # Last line of defence. Ingestion is bounded now, but if anything ever walks
+    # memory up again the process logs and exits so supervisor restarts just
+    # this program. The kernel OOM killer instead fails the whole supervisor
+    # cgroup, which is what took every unrelated service down with it.
+    memory_limit_mb: int = int(os.getenv("MONITOR_MEMORY_LIMIT_MB", "1024"))
     stale_request_seconds: int = int(
         os.getenv("MONITOR_STALE_REQUEST_SECONDS", "240")
     )

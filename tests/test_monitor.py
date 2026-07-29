@@ -8,10 +8,12 @@ import zipfile
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
+from app.database import monitor as monitor_db
 from app.models.log import LogSearchParams, RequestOutcome
 from app.services.monitor_service import MonitorService
 from config import Settings
@@ -413,6 +415,113 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(
             {cluster.dimensions["proxy_country"] for cluster in clusters.clusters},
             {"US", "DE"},
+        )
+
+    def test_batched_ingest_drains_a_backlog_without_losing_or_repeating_rows(
+        self,
+    ) -> None:
+        """A file past the per-pass cap must survive being ingested in pieces.
+
+        Holding a whole source file in memory is what drove the monitor into
+        the OOM killer, so ingestion now commits in batches and stops partway
+        through a large file. Both of those split a single logical read across
+        several syncs, and neither may drop a line or import one twice.
+        """
+
+        # Drain the fixtures first so the counts below are the backlog alone.
+        baseline = self.service.sync().imported
+
+        started = datetime.now() - timedelta(minutes=2)
+        line_count = 25
+        backlog = "".join(
+            log_line(
+                started + timedelta(milliseconds=index),
+                "INFO",
+                f"backlog-{index}",
+                "request started method=POST path=/get_hcaptcha_key",
+            )
+            for index in range(line_count)
+        )
+        (self.log_dir / "application_backlog.log").write_text(
+            backlog, encoding="utf-8"
+        )
+
+        # Force many batches, and a per-pass cap that stops mid-file.
+        with mock.patch.object(monitor_db, "BATCH_MAX_ENTRIES", 3), mock.patch.object(
+            monitor_db, "MAX_BYTES_PER_FILE_PER_SYNC", len(backlog) // 5
+        ):
+            passes = 0
+            imported = 0
+            while True:
+                batch_result = self.service.sync()
+                imported += batch_result.imported
+                passes += 1
+                if batch_result.imported == 0 or passes > 50:
+                    break
+
+        self.assertGreater(passes, 2, "the cap should have split the file")
+        self.assertEqual(imported, line_count)
+        self.assertEqual(self.service.sync().imported, 0)
+
+        with self.service.repository.connection() as connection:
+            stored = connection.execute(
+                "SELECT COUNT(*) FROM log_entries WHERE request_id LIKE 'backlog-%'"
+            ).fetchone()[0]
+            distinct = connection.execute(
+                "SELECT COUNT(DISTINCT request_id) FROM log_entries "
+                "WHERE request_id LIKE 'backlog-%'"
+            ).fetchone()[0]
+        self.assertEqual(stored, line_count)
+        self.assertEqual(distinct, line_count)
+        self.assertGreater(baseline, 0)
+
+    def test_maintenance_returns_freed_pages_instead_of_growing_forever(self) -> None:
+        """Retention frees pages; only maintain() gives them back to the file.
+
+        Guards a sharp edge: both pragmas involved do their work as the
+        statement is stepped, and execute() steps once. Drop the fetchall()
+        and this moves a single page per pass while still looking healthy —
+        which is how a 4.8k-request index reached 3.4 GB.
+        """
+
+        blob = "x" * 4096
+        with self.service.repository.connection() as connection:
+            for index in range(400):
+                connection.execute(
+                    """
+                    INSERT INTO log_entries (
+                        fingerprint, timestamp, timestamp_epoch, level, ip,
+                        session_id, request_id, module, function, line, event,
+                        message, attributes_json, raw_line, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"bulk-{index}", "2026-01-01T00:00:00", float(index),
+                        "INFO", "127.0.0.1", "session", f"bulk-{index}", "m",
+                        "f", 1, "log", "message", "{}", blob, "bulk",
+                    ),
+                )
+
+        with self.service.repository.connection() as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA auto_vacuum").fetchone()[0],
+                2,
+                "incremental auto-vacuum must be armed before WAL is set",
+            )
+
+        self.service.repository.prune_before(1e12)
+        with self.service.repository.connection() as connection:
+            freed = connection.execute("PRAGMA freelist_count").fetchone()[0]
+        self.assertGreater(freed, 1, "deleting rows should leave free pages")
+
+        self.service.repository.maintain()
+
+        with self.service.repository.connection() as connection:
+            remaining = connection.execute("PRAGMA freelist_count").fetchone()[0]
+        self.assertLess(
+            remaining,
+            freed - 1,
+            "maintain() must reclaim in bulk, not one page per call",
         )
 
     def test_monitor_retention_removes_old_log_and_request_rows(self) -> None:

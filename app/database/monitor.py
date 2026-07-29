@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 import zipfile
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +19,19 @@ from app.utils.log_parser import LogParser
 
 
 SOLVE_PATHS = ("/get_hcaptcha_key", "/v1/hcaptcha/solve")
+
+# Ingestion streams in bounded batches instead of materializing a whole file.
+# One hCaptcha trace line runs past 80 KB, so a 200 MB source file parsed into
+# LogEntry objects costs ~1.2 GB of RSS, and CPython hands only ~6% of that back
+# to the OS. Repeating that per rotated file walked the process into the OOM
+# killer, which in turn took the whole supervisor unit down with it.
+BATCH_MAX_ENTRIES = 500
+BATCH_MAX_BYTES = 4 * 1024 * 1024
+
+# Cap the work one sync pass spends on a single file. A large backlog then
+# drains over several passes rather than holding the ingest lock — and every
+# API request that waits behind it — for minutes.
+MAX_BYTES_PER_FILE_PER_SYNC = 32 * 1024 * 1024
 
 TRACE_COLUMNS: dict[str, str] = {
     "queue_wait_ms": "REAL",
@@ -54,8 +67,14 @@ TRACE_COLUMNS: dict[str, str] = {
     "proxy_isp": "TEXT",
     "locale_geo_match": "INTEGER",
     "timezone_geo_match": "INTEGER",
-    "trace_json": "TEXT",
 }
+
+# Written by earlier versions, read by nothing. Each value repeated the trace
+# payload already held in log_entries.raw_line and expanded into request_spans,
+# so it was a third copy of the largest field in the schema — the single biggest
+# contributor to a 3.4 GB index over 4.8k requests. New rows leave it NULL and
+# every query below skips it; the column stays so existing databases still open.
+DEAD_SUMMARY_COLUMNS = frozenset({"trace_json"})
 
 
 def _span_name(category: str, item: dict[str, object]) -> str:
@@ -108,7 +127,20 @@ class MonitorRepository:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.summary_columns: tuple[str, ...] = ()
         self._initialize()
+
+    def summary_select(self, alias: str = "") -> str:
+        """Column list for request_summaries with dead columns left behind.
+
+        `SELECT *` over a retention window pulled every trace payload into
+        memory on each poll of the overview endpoint, for columns no caller
+        reads. Naming the live columns keeps old databases — which still carry
+        the populated dead column — as cheap to query as freshly built ones.
+        """
+
+        prefix = f"{alias}." if alias else ""
+        return ", ".join(f"{prefix}{name}" for name in self.summary_columns)
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -132,6 +164,15 @@ class MonitorRepository:
 
     def _initialize(self) -> None:
         with self.connection() as connection:
+            # Retention deletes rows every pass but SQLite only reuses freed
+            # pages, so the file kept the high-water mark of every burst.
+            # Incremental vacuum lets maintain() hand pages back.
+            #
+            # This has to run before journal_mode: setting WAL writes the header
+            # and freezes auto_vacuum at whatever it was, silently. An existing
+            # database is likewise already frozen and needs one offline VACUUM
+            # to convert — see the deployment notes in README.
+            connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
@@ -250,6 +291,38 @@ class MonitorRepository:
                 "ON request_summaries(proxy_country, proxy_asn, proxy_endpoint_key, "
                 "started_epoch DESC)"
             )
+            self.summary_columns = tuple(
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(request_summaries)")
+                if str(row[1]) not in DEAD_SUMMARY_COLUMNS
+            )
+
+    # Roughly 16 MB of pages per call at the default page size. Enough to stay
+    # ahead of one retention window's churn, small enough that a pass never
+    # becomes a visible stall.
+    VACUUM_PAGES_PER_PASS = 4000
+
+    def maintain(self) -> None:
+        """Return freed pages to the filesystem and truncate the WAL.
+
+        Strictly best effort. This runs while the ingest lock is held, so it
+        uses a short busy timeout rather than the 30s readers get: a checkpoint
+        that cannot get its turn must yield immediately instead of stalling
+        every API request behind it. Whatever it skips, the next call retries.
+        """
+
+        try:
+            with closing(self.connect()) as connection:
+                connection.execute("PRAGMA busy_timeout = 2000")
+                # Both pragmas do their work as the statement is stepped, and
+                # execute() steps once. Without draining the cursor this moves
+                # exactly one page and silently looks like it ran.
+                connection.execute(
+                    f"PRAGMA incremental_vacuum({self.VACUUM_PAGES_PER_PASS})"
+                ).fetchall()
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        except sqlite3.Error:
+            return
 
     def source_state(self, path: str) -> sqlite3.Row | None:
         with self.connection() as connection:
@@ -557,14 +630,9 @@ class MonitorRepository:
             for key in TRACE_COLUMNS
             if key in dimensions
         }
-        column_values.update(
-            {
-                "fingerprint_key": fingerprint_key,
-                "trace_json": json.dumps(
-                    payload, ensure_ascii=False, separators=(",", ":")
-                ),
-            }
-        )
+        # fingerprint_key alone keeps column_values non-empty, which the
+        # assignment list below depends on to stay valid SQL.
+        column_values.update({"fingerprint_key": fingerprint_key})
         bool_columns = {"locale_geo_match", "timezone_geo_match"}
         for key in bool_columns:
             if column_values.get(key) is not None:
@@ -821,10 +889,41 @@ class LogIngestor:
             and stat.st_size >= int(state["offset"])
         ):
             offset = int(state["offset"])
-        entries: list[LogEntry] = []
+        imported = 0
         parsed = 0
         failures = 0
+        batch: list[LogEntry] = []
+        batch_bytes = 0
+        batch_failures = 0
+        start_offset = offset
         final_offset = offset
+
+        def flush(checkpoint: int) -> None:
+            """Persist the pending batch and move the stored offset with it.
+
+            Committing the offset alongside the rows means a restart resumes
+            where the last batch landed instead of re-parsing the file from the
+            beginning. Duplicate rows are impossible either way — log_entries
+            is keyed by a line fingerprint — so a partial file only ever costs
+            repeated work, never repeated data.
+            """
+
+            nonlocal imported, batch, batch_bytes, batch_failures
+            if batch:
+                imported += self.repository.insert_entries(batch, key)
+            self.repository.update_source(
+                path=key,
+                inode=stat.st_ino,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                offset=checkpoint,
+                complete=False,
+                parse_failures=batch_failures,
+            )
+            batch = []
+            batch_bytes = 0
+            batch_failures = 0
+
         with path.open("rb") as handle:
             handle.seek(offset)
             while True:
@@ -833,25 +932,23 @@ class LogIngestor:
                 if not raw:
                     break
                 if not raw.endswith(b"\n"):
+                    # A line the writer has not finished; re-read it next pass.
                     final_offset = line_offset
                     break
                 final_offset = handle.tell()
                 entry = self.parser.parse_line(raw.decode("utf-8", errors="replace"))
                 if entry is None:
                     failures += 1
+                    batch_failures += 1
                 else:
                     parsed += 1
-                    entries.append(entry)
-        imported = self.repository.insert_entries(entries, key)
-        self.repository.update_source(
-            path=key,
-            inode=stat.st_ino,
-            size=stat.st_size,
-            mtime_ns=stat.st_mtime_ns,
-            offset=final_offset,
-            complete=False,
-            parse_failures=failures,
-        )
+                    batch.append(entry)
+                    batch_bytes += len(raw)
+                if len(batch) >= BATCH_MAX_ENTRIES or batch_bytes >= BATCH_MAX_BYTES:
+                    flush(final_offset)
+                if final_offset - start_offset >= MAX_BYTES_PER_FILE_PER_SYNC:
+                    break
+        flush(final_offset)
         return imported, parsed, failures
 
     def _sync_zip(
@@ -874,7 +971,11 @@ class LogIngestor:
                     and int(state["mtime_ns"]) == stat.st_mtime_ns
                 ):
                     continue
-                entries: list[LogEntry] = []
+                # Archives decompress to the same 100-200 MB the active files
+                # reach, so they stream in batches too. The member is only
+                # marked complete once every batch is committed.
+                batch: list[LogEntry] = []
+                batch_bytes = 0
                 member_failures = 0
                 with archive.open(member) as handle:
                     for raw in handle:
@@ -883,8 +984,17 @@ class LogIngestor:
                             member_failures += 1
                         else:
                             parsed += 1
-                            entries.append(entry)
-                imported += self.repository.insert_entries(entries, key)
+                            batch.append(entry)
+                            batch_bytes += len(raw)
+                        if (
+                            len(batch) >= BATCH_MAX_ENTRIES
+                            or batch_bytes >= BATCH_MAX_BYTES
+                        ):
+                            imported += self.repository.insert_entries(batch, key)
+                            batch = []
+                            batch_bytes = 0
+                if batch:
+                    imported += self.repository.insert_entries(batch, key)
                 failures += member_failures
                 self.repository.update_source(
                     path=key,

@@ -8,7 +8,7 @@ This fits the current deployment: one hCaptcha process, one monitor process, one
 
 ## Data Flow
 
-1. `LogIngestor` reads active `application_*.log` files from their last byte offset and imports each `.log.zip` member once.
+1. `LogIngestor` reads active source files from their last byte offset and imports each archive member once. Lines are parsed and committed in bounded batches, and the stored offset advances with each batch, so peak memory tracks the batch size rather than the file size and a restart resumes mid-file. One pass reads at most 32 MB per file; a backlog drains across passes instead of holding the ingest lock.
 2. SHA-256 line fingerprints make rotation and retries idempotent.
 3. The parser extracts request/session/IP context and typed lifecycle events such as `solve_succeeded`, `solve_failed`, and `token_committed`.
 4. `MonitorRepository` writes raw entries and request summaries to `data/monitor.db` in SQLite WAL mode.

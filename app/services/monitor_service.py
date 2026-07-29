@@ -47,6 +47,9 @@ from app.models.log import (
 )
 
 
+MAINTENANCE_INTERVAL_SECONDS = 300
+
+
 CLUSTER_DIMENSIONS = {
     "profile_variant": "Profile",
     "profile_id": "Profile ID",
@@ -94,6 +97,7 @@ class MonitorService:
         self.repository = MonitorRepository(monitor_database)
         self.ingestor = LogIngestor(log_dir, self.repository)
         self._sync_lock = threading.Lock()
+        self._next_maintenance = 0.0
 
     def sync(self) -> SyncResult:
         with self._sync_lock:
@@ -104,6 +108,12 @@ class MonitorService:
             pruned = self.repository.prune_before(
                 time.time() - self.retention_days * 24 * 60 * 60
             )
+            # Reclaiming pages is far more expensive than a sync, and syncs run
+            # every couple of seconds, so it rides a timer of its own.
+            now = time.time()
+            if now >= self._next_maintenance:
+                self.repository.maintain()
+                self._next_maintenance = now + MAINTENANCE_INTERVAL_SECONDS
             return SyncResult(
                 imported=result.imported,
                 parsed=result.parsed,
@@ -201,8 +211,8 @@ class MonitorService:
         cutoff = (datetime.now() - timedelta(hours=hours)).timestamp()
         with self.repository.connection() as connection:
             summary_rows = connection.execute(
-                """
-                SELECT * FROM request_summaries
+                f"""
+                SELECT {self.repository.summary_select()} FROM request_summaries
                 WHERE path IN (?, ?) AND started_epoch >= ?
                 ORDER BY started_epoch DESC
                 """,
@@ -326,7 +336,8 @@ class MonitorService:
             )
             rows = connection.execute(
                 f"""
-                SELECT r.* FROM request_summaries r{where}
+                SELECT {self.repository.summary_select("r")} FROM request_summaries r
+                {where}
                 ORDER BY r.started_epoch DESC LIMIT ? OFFSET ?
                 """,
                 (*values, params.page_size, offset),
@@ -342,7 +353,9 @@ class MonitorService:
         self.sync()
         with self.repository.connection() as connection:
             row = connection.execute(
-                "SELECT * FROM request_summaries WHERE request_id = ?", (request_id,)
+                f"SELECT {self.repository.summary_select()} FROM request_summaries "
+                "WHERE request_id = ?",
+                (request_id,),
             ).fetchone()
         if row is None:
             return None
@@ -365,8 +378,8 @@ class MonitorService:
         cutoff = (datetime.now() - timedelta(hours=hours)).timestamp()
         with self.repository.connection() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM request_summaries
+                f"""
+                SELECT {self.repository.summary_select()} FROM request_summaries
                 WHERE path IN (?, ?) AND started_epoch >= ?
                   AND outcome IN ('success', 'failure', 'rejected')
                 ORDER BY started_epoch DESC

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import resource
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
@@ -18,14 +20,41 @@ from app.services.monitor_service import MonitorService
 from config import Settings
 
 
+_PAGE_SIZE = resource.getpagesize()
+
+
+def _resident_bytes() -> int:
+    """Resident set size, or 0 where the platform does not expose it."""
+
+    try:
+        with open("/proc/self/statm", encoding="ascii") as handle:
+            return int(handle.read().split()[1]) * _PAGE_SIZE
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
 async def _sync_loop(
-    monitor: MonitorService, stop: asyncio.Event, interval_seconds: float
+    monitor: MonitorService,
+    stop: asyncio.Event,
+    interval_seconds: float,
+    memory_limit_bytes: int,
 ) -> None:
     while not stop.is_set():
         try:
             await asyncio.to_thread(monitor.sync)
         except Exception:
             logger.exception("background log sync failed")
+        resident = _resident_bytes()
+        if memory_limit_bytes and resident > memory_limit_bytes:
+            # Exiting non-zero hands the restart to supervisor. Waiting for the
+            # kernel instead fails the entire supervisor unit.
+            logger.critical(
+                "resident memory {} MB exceeded the {} MB limit, exiting for restart",
+                resident // (1024 * 1024),
+                memory_limit_bytes // (1024 * 1024),
+            )
+            await logger.complete()
+            os._exit(1)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
         except TimeoutError:
@@ -51,7 +80,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await asyncio.to_thread(monitor.sync)
         stop = asyncio.Event()
         task = asyncio.create_task(
-            _sync_loop(monitor, stop, config.sync_interval_seconds)
+            _sync_loop(
+                monitor,
+                stop,
+                config.sync_interval_seconds,
+                config.memory_limit_mb * 1024 * 1024,
+            )
         )
         logger.info(
             "monitor started log_dir={} database={}",

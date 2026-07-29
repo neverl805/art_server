@@ -41,10 +41,26 @@ cp .env.example .env
 
 ## 保留与清理
 
-- 监控索引默认保留 2 天，由 `MONITOR_RETENTION_DAYS` 控制；后台每次同步都会删除过期日志、请求和链路 span，并移除已经不存在的日志源状态。
+- 监控索引默认保留 1 天，由 `MONITOR_RETENTION_DAYS` 控制；后台每次同步都会删除过期日志、请求和链路 span，并移除已经不存在的日志源状态。
 - hCaptcha 原始日志默认每天轮转、压缩为 zip 并保留 2 天，由 hCaptcha 服务的 `HCAPTCHA_LOG_ROTATION`、`HCAPTCHA_LOG_COMPRESSION` 和 `HCAPTCHA_LOG_RETENTION_DAYS` 控制。
 - 监控 API 自身的 `monitor_*.log` 每天轮转并保留 14 天。
-- 自动清理后的 SQLite 空闲页会继续复用，文件不一定立即变小；需要立即释放磁盘空间时，在监控首页点击清理按钮。
+- 删除只会把页面挂到空闲链上，文件不会自己变小。后台每 5 分钟做一次增量 vacuum 并截断 WAL，把空闲页还给文件系统；需要立即整体回收时，在监控首页点击清理按钮。
+
+## 资源上限
+
+摄取按批提交，峰值内存与源文件大小无关：100 MB 和 250 MB 的日志文件都只占用约 50 MB 常驻内存。单次同步对每个文件最多读 32 MB，积压会分多轮排空，不会长时间占住摄取锁。
+
+`MONITOR_MEMORY_LIMIT_MB`（默认 1024）是最后一道防线：常驻内存越限时进程记录 CRITICAL 日志并退出，交由 supervisor 单独重启本程序。这一步是必要的——等内核 OOM killer 动手会让整个 supervisor unit 判定失败，把同组其他服务一起带走。
+
+### 升级到本版本时的一次性操作
+
+`auto_vacuum` 只能在数据库还没有建表时设定，已存在的库需要离线转换一次，否则增量回收始终是空操作：
+
+```bash
+sqlite3 "$MONITOR_DATABASE" "PRAGMA auto_vacuum=INCREMENTAL; VACUUM;"
+```
+
+执行前先确认可用磁盘大于当前库的一倍——`VACUUM` 需要重建整个文件。
 
 监控链路没有 Redis 或常驻日志缓存。页面展示的“索引”包含 SQLite 主文件、WAL 和共享内存文件的磁盘占用；“源日志”是 hCaptcha 原始日志文件占用。
 
