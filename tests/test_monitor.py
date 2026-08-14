@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import threading
+import json
 import unittest
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -803,3 +804,33 @@ class MultiNodeTest(unittest.TestCase):
         self.assertEqual(result.source_files, 1)
         self.assertIsNotNone(self.service.get_request_detail("req-a"))
         self.assertIsNone(self.service.get_request_detail("req-b"))
+
+
+class TimestampPrecisionTest(unittest.TestCase):
+    """The service writes nanoseconds; `fromisoformat` before 3.11 accepts only 3 or 6 digits.
+
+    Moving the panel from a Python 3.14 host to a 3.10 one made every line fail to parse, and
+    the only symptom was `parse_failures` rising beside `imported: 0` -- which reads like
+    corrupt input rather than an interpreter difference. Pinned here so the panel stays
+    runnable on whatever Python a host happens to have.
+    """
+
+    def test_a_nanosecond_timestamp_parses_on_every_interpreter(self):
+        from app.utils.log_parser import LogParser
+
+        for stamp in (
+            "2026-08-12T09:05:35.752677786+08:00",  # nanoseconds, what the service writes
+            "2026-08-12T09:05:35.752677+08:00",     # microseconds
+            "2026-08-12T09:05:35.752+08:00",        # milliseconds
+            "2026-08-12T09:05:35+08:00",            # none at all
+        ):
+            line = json.dumps({"ts": stamp, "level": "INFO", "event": "request_started", "data": {}})
+            entry = LogParser.parse_line(line)
+            self.assertIsNotNone(entry, f"{stamp} failed to parse")
+            self.assertEqual(entry.timestamp.year, 2026)
+
+    def test_a_timestamp_that_is_not_a_timestamp_is_still_rejected(self):
+        from app.utils.log_parser import LogParser
+
+        line = json.dumps({"ts": "not-a-time", "level": "INFO", "event": "e", "data": {}})
+        self.assertIsNone(LogParser.parse_line(line))

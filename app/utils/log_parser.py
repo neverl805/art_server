@@ -121,6 +121,27 @@ class LogParser:
             return cls._parse_jsonl(raw_line)
         return cls._parse_prose(raw_line)
 
+    @staticmethod
+    def _parse_timestamp(value: object) -> "datetime | None":
+        """Read the service's timestamps on any interpreter.
+
+        `datetime.fromisoformat` accepts only 3 or 6 fractional digits before Python 3.11,
+        and the service writes NANOSECONDS (9 digits). Moving this panel from a 3.14 host to
+        a 3.10 one therefore made EVERY line fail to parse, and the only symptom was a rising
+        `parse_failures` beside `imported: 0` -- which reads like corrupt input, not an
+        interpreter difference, and took a while to place. Truncate the fraction rather than
+        depend on the interpreter: this panel neither displays nor sorts on sub-microsecond
+        precision.
+        """
+        text = str(value)
+        match = re.match(r"^(.*\.\d{6})\d+(.*)$", text)
+        if match:
+            text = match.group(1) + match.group(2)
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
     @classmethod
     def _parse_jsonl(cls, raw_line: str) -> LogEntry | None:
         try:
@@ -130,8 +151,10 @@ class LogParser:
         if not isinstance(record, dict) or "event" not in record:
             return None
         try:
-            timestamp = datetime.fromisoformat(str(record["ts"]))
-        except (KeyError, ValueError):
+            timestamp = cls._parse_timestamp(record["ts"])
+        except KeyError:
+            return None
+        if timestamp is None:
             return None
         try:
             level = LogLevel(str(record.get("level")))
