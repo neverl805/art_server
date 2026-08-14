@@ -376,13 +376,27 @@ class MonitorRepository:
             )
         return len(stale)
 
-    def insert_entries(self, entries: Iterable[LogEntry], source: str, host: str) -> int:
+    def insert_entries(
+        self, entries: Iterable[LogEntry], source: str, host: str, retention_epoch: float = 0.0
+    ) -> int:
+        """Index a batch, skipping anything already outside the retention window.
+
+        `retention_epoch` matters much more now that sources are remote. A node keeps its own
+        log files for its own retention, which is longer than the monitor's, so first contact
+        with a node hands back its whole surviving history -- most of which the monitor's
+        retention sweep would delete moments later. Inserting and then deleting those rows is
+        not merely wasted work: it leaves the free pages behind, and on the first two-node
+        sync it grew a 1.8 MB index into a 290 MB file holding 18 MB of live data, which was
+        slow enough to make the panel unusable until a VACUUM. Filtering here keeps them out
+        in the first place.
+        """
         imported = 0
         with self.connection() as connection:
             cutoff_row = connection.execute(
                 "SELECT value FROM monitor_state WHERE key = 'index_cutoff_epoch'"
             ).fetchone()
             cutoff_epoch = float(cutoff_row["value"]) if cutoff_row else 0.0
+            cutoff_epoch = max(cutoff_epoch, retention_epoch)
             for entry in entries:
                 if entry.timestamp.timestamp() <= cutoff_epoch:
                     continue
@@ -859,14 +873,19 @@ class RemoteLogIngestor:
     SOURCE_PREFIX = "node://"
 
     def __init__(self, nodes, repository: "MonitorRepository", *, batch_lines: int = 2000,
-                 timeout_seconds: float = 10.0, max_batches: int = 20) -> None:
+                 timeout_seconds: float = 10.0, max_batches: int = 20,
+                 retention_days: int = 2) -> None:
         self.nodes = tuple(nodes)
         self.repository = repository
         self.parser = LogParser()
         self.batch_lines = batch_lines
         self.timeout_seconds = timeout_seconds
         self.max_batches = max_batches
+        self.retention_days = max(1, retention_days)
         self._lock = threading.Lock()
+
+    def _retention_epoch(self) -> float:
+        return time.time() - self.retention_days * 86400
 
     def source_key(self, node_name: str) -> str:
         return f"{self.SOURCE_PREFIX}{node_name}"
@@ -943,7 +962,9 @@ class RemoteLogIngestor:
                 else:
                     parsed += 1
                     entries.append(entry)
-            imported += self.repository.insert_entries(entries, key, node.name)
+            imported += self.repository.insert_entries(
+                entries, key, node.name, self._retention_epoch()
+            )
 
             next_cursor = str(payload.get("next_cursor") or "")
             # Persist after each batch, not once at the end: a crash mid-catch-up then costs

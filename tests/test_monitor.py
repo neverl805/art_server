@@ -506,6 +506,9 @@ class MonitorTest(unittest.TestCase):
         )
 
     def test_monitor_retention_removes_old_log_and_request_rows(self) -> None:
+        # Drain the setUp fixtures first, so `imported` below counts only the old line.
+        self.service.sync()
+
         old = datetime.now() - timedelta(days=3)
         self.node.emit(
             log_line(
@@ -516,10 +519,20 @@ class MonitorTest(unittest.TestCase):
             )
         )
 
+        before = self.service.repository.storage_bytes()
         result = self.service.sync()
 
-        self.assertGreaterEqual(result.pruned, 2)
+        # Out-of-retention rows are now rejected at insert time rather than inserted and then
+        # swept. The observable guarantee is unchanged -- they are not queryable -- but they
+        # also never occupy a page, which is what stopped a first two-node sync from inflating
+        # the index to 290 MB of mostly free space.
         self.assertIsNone(self.service.get_request_detail("old-request"))
+        self.assertEqual(result.imported, 0, "an out-of-retention line must not be indexed at all")
+        self.assertLessEqual(
+            self.service.repository.storage_bytes() - before,
+            65536,
+            "indexing nothing should not grow the database",
+        )
 
     def test_stale_in_progress_request_is_marked_interrupted(self) -> None:
         stale = datetime.now() - timedelta(minutes=10)

@@ -101,6 +101,7 @@ class MonitorService:
             batch_lines=ingest_batch_lines,
             timeout_seconds=ingest_timeout_seconds,
             max_batches=ingest_max_batches,
+            retention_days=self.retention_days,
         )
         self._sync_lock = threading.Lock()
 
@@ -206,7 +207,15 @@ class MonitorService:
         return data
 
     def get_overview(self, hours: int = 24) -> LogOverviewStats:
-        self.sync()
+        # NOT `self.sync()` -- reads must not drive ingestion.
+        #
+        # These four read paths used to sync first, which was free when a sync meant tailing a
+        # local file. Ingestion is now a network pull from every node, so the same call became
+        # ~10s of cross-site HTTP on every panel request: measured at 20s per `/api/logs/*`
+        # response, with `get_overview` spending 10.09 of its 10.19s inside sync issuing 41
+        # requests. The background loop in `main.py` already re-syncs every
+        # `MONITOR_SYNC_INTERVAL_SECONDS`, so the index is at most one interval stale, and the
+        # explicit `/api/logs/sync` endpoint still exists for a forced refresh.
         cutoff = (datetime.now() - timedelta(hours=hours)).timestamp()
         with self.repository.connection() as connection:
             summary_rows = connection.execute(
@@ -281,7 +290,15 @@ class MonitorService:
         )
 
     def search_requests(self, params: LogSearchParams) -> LogListResponse:
-        self.sync()
+        # NOT `self.sync()` -- reads must not drive ingestion.
+        #
+        # These four read paths used to sync first, which was free when a sync meant tailing a
+        # local file. Ingestion is now a network pull from every node, so the same call became
+        # ~10s of cross-site HTTP on every panel request: measured at 20s per `/api/logs/*`
+        # response, with `get_overview` spending 10.09 of its 10.19s inside sync issuing 41
+        # requests. The background loop in `main.py` already re-syncs every
+        # `MONITOR_SYNC_INTERVAL_SECONDS`, so the index is at most one interval stale, and the
+        # explicit `/api/logs/sync` endpoint still exists for a forced refresh.
         clauses: list[str] = []
         values: list[Any] = []
         if not params.include_non_solve:
@@ -354,7 +371,15 @@ class MonitorService:
         )
 
     def get_request_detail(self, request_id: str) -> LogGroup | None:
-        self.sync()
+        # NOT `self.sync()` -- reads must not drive ingestion.
+        #
+        # These four read paths used to sync first, which was free when a sync meant tailing a
+        # local file. Ingestion is now a network pull from every node, so the same call became
+        # ~10s of cross-site HTTP on every panel request: measured at 20s per `/api/logs/*`
+        # response, with `get_overview` spending 10.09 of its 10.19s inside sync issuing 41
+        # requests. The background loop in `main.py` already re-syncs every
+        # `MONITOR_SYNC_INTERVAL_SECONDS`, so the index is at most one interval stale, and the
+        # explicit `/api/logs/sync` endpoint still exists for a forced refresh.
         with self.repository.connection() as connection:
             row = connection.execute(
                 "SELECT * FROM request_summaries WHERE request_id = ?", (request_id,)
@@ -370,7 +395,15 @@ class MonitorService:
         dimensions: list[str],
         min_samples: int = 1,
     ) -> FingerprintClusterResponse:
-        self.sync()
+        # NOT `self.sync()` -- reads must not drive ingestion.
+        #
+        # These four read paths used to sync first, which was free when a sync meant tailing a
+        # local file. Ingestion is now a network pull from every node, so the same call became
+        # ~10s of cross-site HTTP on every panel request: measured at 20s per `/api/logs/*`
+        # response, with `get_overview` spending 10.09 of its 10.19s inside sync issuing 41
+        # requests. The background loop in `main.py` already re-syncs every
+        # `MONITOR_SYNC_INTERVAL_SECONDS`, so the index is at most one interval stale, and the
+        # explicit `/api/logs/sync` endpoint still exists for a forced refresh.
         group_by = list(dict.fromkeys(dimensions))
         invalid = [name for name in group_by if name not in CLUSTER_DIMENSIONS]
         if invalid:
