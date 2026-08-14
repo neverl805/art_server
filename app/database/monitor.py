@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,7 +22,14 @@ from app.models.log import LogEntry
 from app.utils.log_parser import LogParser
 
 
+LOGGER = logging.getLogger(__name__)
+
 SOLVE_PATHS = ("/get_hcaptcha_key", "/v1/hcaptcha/solve")
+
+#: Stamped on rows that predate multi-node ingestion. Not a legal node name (a node name
+#: comes from MONITOR_NODES and is a plain identifier), so "we did not know the host" is
+#: always distinguishable from a host we did know.
+LEGACY_HOST = "?"
 
 TRACE_COLUMNS: dict[str, str] = {
     "queue_wait_ms": "REAL",
@@ -241,6 +252,36 @@ class MonitorRepository:
                     connection.execute(
                         f"ALTER TABLE request_summaries ADD COLUMN {name} {sql_type}"
                     )
+
+            # `host` identifies which service produced a row. Added by migration rather than
+            # in the CREATE TABLE above so an existing monitor.db keeps its history: rows that
+            # predate multi-node ingestion get the placeholder below, which is deliberately
+            # not a real node name so a query can tell "before we tracked this" apart from
+            # "node whose name we know".
+            for table in ("log_entries", "request_summaries"):
+                columns = {
+                    str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+                }
+                if "host" not in columns:
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN host TEXT NOT NULL DEFAULT '{LEGACY_HOST}'"
+                    )
+            # A remote node's position is an opaque cursor string, not a byte offset into
+            # a local inode, so `ingest_sources` grows a column for it rather than overloading
+            # the numeric `offset` the file ingestor used.
+            source_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(ingest_sources)")
+            }
+            if "cursor" not in source_columns:
+                connection.execute("ALTER TABLE ingest_sources ADD COLUMN cursor TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_host "
+                "ON log_entries(host, timestamp_epoch DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_requests_host_started "
+                "ON request_summaries(host, started_epoch DESC)"
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_requests_fingerprint "
                 "ON request_summaries(fingerprint_key, started_epoch DESC)"
@@ -256,6 +297,29 @@ class MonitorRepository:
             return connection.execute(
                 "SELECT * FROM ingest_sources WHERE path = ?", (path,)
             ).fetchone()
+
+    def set_node_cursor(self, path: str, cursor: str, parse_failures: int) -> None:
+        """Persist one node's resume position.
+
+        The file-shaped columns (`inode`, `size`, `mtime_ns`, `offset`) are meaningless for a
+        remote source and are written as zeroes rather than being made nullable, so the table
+        keeps one shape for both kinds of source and `prune_source_states` still works
+        unchanged. `complete` stays 0: a live node is never finished.
+        """
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO ingest_sources (
+                    path, inode, size, mtime_ns, offset, complete,
+                    parse_failures, updated_at, cursor
+                ) VALUES (?, 0, 0, 0, 0, 0, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    parse_failures = excluded.parse_failures,
+                    updated_at = excluded.updated_at,
+                    cursor = excluded.cursor
+                """,
+                (path, parse_failures, time.time(), cursor),
+            )
 
     def update_source(
         self,
@@ -312,7 +376,7 @@ class MonitorRepository:
             )
         return len(stale)
 
-    def insert_entries(self, entries: Iterable[LogEntry], source: str) -> int:
+    def insert_entries(self, entries: Iterable[LogEntry], source: str, host: str) -> int:
         imported = 0
         with self.connection() as connection:
             cutoff_row = connection.execute(
@@ -322,14 +386,21 @@ class MonitorRepository:
             for entry in entries:
                 if entry.timestamp.timestamp() <= cutoff_epoch:
                     continue
-                fingerprint = hashlib.sha256(entry.raw_line.encode("utf-8")).hexdigest()
+                # Host is part of the identity, not just an attribute: log_entries.fingerprint
+                # is UNIQUE, so hashing the raw line alone would make a byte-identical line
+                # from two nodes collide and silently drop one of them. Most lines carry a
+                # uuid request id and could never collide, but SYSTEM-scoped ones (service
+                # start, warnings) carry no per-request entropy at all.
+                fingerprint = hashlib.sha256(
+                    f"{host}\x00{entry.raw_line}".encode("utf-8")
+                ).hexdigest()
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO log_entries (
                         fingerprint, timestamp, timestamp_epoch, level, ip,
                         session_id, request_id, module, function, line, event,
-                        message, attributes_json, raw_line, source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        message, attributes_json, raw_line, source, host
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         fingerprint,
@@ -347,27 +418,29 @@ class MonitorRepository:
                         json.dumps(entry.attributes, ensure_ascii=False, separators=(",", ":")),
                         entry.raw_line,
                         source,
+                        host,
                     ),
                 )
                 if cursor.rowcount != 1:
                     continue
                 imported += 1
                 if entry.request_id != "SYSTEM":
-                    self._update_request(connection, entry)
+                    self._update_request(connection, entry, host)
         return imported
 
-    def _update_request(self, connection: sqlite3.Connection, entry: LogEntry) -> None:
+    def _update_request(self, connection: sqlite3.Connection, entry: LogEntry, host: str) -> None:
         timestamp = entry.timestamp.isoformat(timespec="milliseconds")
         epoch = entry.timestamp.timestamp()
         connection.execute(
             """
             INSERT INTO request_summaries (
                 request_id, session_id, ip, started_at, ended_at,
-                started_epoch, ended_epoch, has_error, log_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                started_epoch, ended_epoch, has_error, log_count, host
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT(request_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 ip = excluded.ip,
+                host = excluded.host,
                 started_at = CASE
                     WHEN excluded.started_epoch < request_summaries.started_epoch
                     THEN excluded.started_at ELSE request_summaries.started_at END,
@@ -388,6 +461,7 @@ class MonitorRepository:
                 epoch,
                 epoch,
                 int(entry.level.value in {"ERROR", "CRITICAL"}),
+                host,
             ),
         )
         attrs = entry.attributes
@@ -760,139 +834,124 @@ class MonitorRepository:
         return int(cursor.rowcount or 0)
 
 
-class LogIngestor:
-    def __init__(self, log_dir: Path, repository: MonitorRepository) -> None:
-        self.log_dir = log_dir
+
+class RemoteLogIngestor:
+    """Pulls events from every configured node's `/admin/events` and indexes them.
+
+    Replaces the file-globbing ingestor this monitor used when it and the service shared a
+    host. That design could only ever see one machine: it read a local directory, and its
+    per-source cursor was an inode plus a byte offset, neither of which means anything across
+    a network. `ARCHITECTURE.md` recorded the single-host assumption as deliberate, and this
+    is the point where the deployment outgrew it -- there are now two services and one panel.
+
+    Pull rather than push, on purpose. The endpoint is read-only and touches nothing a solve
+    depends on, so the worst this can do to a captcha node is nothing at all; a shipper living
+    inside the service would share its process and its fate. It also means the monitor sets
+    the rate, so a backlog drains at a speed we choose instead of arriving as a flood.
+
+    Failure is per node and never fatal: one unreachable node leaves its cursor untouched and
+    the others still sync, because a monitor that shows one node's traffic beats a monitor
+    that shows none.
+    """
+
+    #: `ingest_sources.path` is reused as an opaque key -- it already holds `zip://...!member`
+    #: for archives, so a scheme prefix is the established idiom here, not a new convention.
+    SOURCE_PREFIX = "node://"
+
+    def __init__(self, nodes, repository: "MonitorRepository", *, batch_lines: int = 2000,
+                 timeout_seconds: float = 10.0, max_batches: int = 20) -> None:
+        self.nodes = tuple(nodes)
         self.repository = repository
         self.parser = LogParser()
+        self.batch_lines = batch_lines
+        self.timeout_seconds = timeout_seconds
+        self.max_batches = max_batches
         self._lock = threading.Lock()
+
+    def source_key(self, node_name: str) -> str:
+        return f"{self.SOURCE_PREFIX}{node_name}"
 
     def sync(self) -> SyncResult:
         with self._lock:
-            imported = 0
-            parsed = 0
-            failures = 0
-            active_sources: set[str] = set()
-            files = self.source_files()
-            for path in files:
-                if path.suffix == ".zip":
-                    result, source_keys = self._sync_zip(path)
-                    active_sources.update(source_keys)
-                else:
-                    result = self._sync_log(path)
-                    active_sources.add(str(path.resolve()))
-                imported += result[0]
-                parsed += result[1]
-                failures += result[2]
-            pruned_sources = self.repository.prune_source_states(active_sources)
+            imported = parsed = failures = 0
+            reachable = 0
+            for node in self.nodes:
+                try:
+                    node_imported, node_parsed, node_failures = self._sync_node(node)
+                except Exception as error:  # noqa: BLE001 - one node must not stop the rest
+                    # Left deliberately broad: a node being down is an expected steady state
+                    # here, not an exception worth propagating into the sync loop, and the
+                    # ways it can fail span URLError, HTTPError, socket timeouts and malformed
+                    # JSON from something that is not the service at all.
+                    LOGGER.warning("node %s sync failed: %s: %s", node.name, type(error).__name__, error)
+                    continue
+                reachable += 1
+                imported += node_imported
+                parsed += node_parsed
+                failures += node_failures
             synced_at = datetime.now()
             self.repository.set_last_sync(synced_at)
-            return SyncResult(
-                imported,
-                parsed,
-                failures,
-                len(files),
-                synced_at,
-                pruned_sources=pruned_sources,
-            )
+            return SyncResult(imported, parsed, failures, reachable, synced_at)
 
-    def source_files(self) -> list[Path]:
-        if not self.log_dir.is_dir():
-            return []
-        return sorted(
-            [
-                # Current format, one file per service worker.
-                *self.log_dir.glob("events_*.jsonl"),
-                *self.log_dir.glob("events_*.jsonl.zip"),
-                # Legacy prose files and their archives.
-                *self.log_dir.glob("application_*.log"),
-                *self.log_dir.glob("application_*.log.zip"),
-            ]
-        )
-
-    def _sync_log(self, path: Path) -> tuple[int, int, int]:
-        stat = path.stat()
-        key = str(path.resolve())
+    def _sync_node(self, node) -> tuple[int, int, int]:
+        key = self.source_key(node.name)
         state = self.repository.source_state(key)
-        offset = 0
-        if (
-            state is not None
-            and int(state["inode"]) == stat.st_ino
-            and stat.st_size >= int(state["offset"])
-        ):
-            offset = int(state["offset"])
-        entries: list[LogEntry] = []
-        parsed = 0
-        failures = 0
-        final_offset = offset
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            while True:
-                line_offset = handle.tell()
-                raw = handle.readline()
-                if not raw:
-                    break
-                if not raw.endswith(b"\n"):
-                    final_offset = line_offset
-                    break
-                final_offset = handle.tell()
-                entry = self.parser.parse_line(raw.decode("utf-8", errors="replace"))
+        cursor = str(state["cursor"]) if state is not None and state["cursor"] else ""
+
+        imported = parsed = failures = 0
+        batches = 0
+        warned_about_name = False
+        while batches < self.max_batches:
+            batches += 1
+            query = {"limit": str(self.batch_lines)}
+            if cursor:
+                query["since"] = cursor
+            url = f"{node.url}/admin/events?{urllib.parse.urlencode(query)}"
+            request = urllib.request.Request(
+                url,
+                method="GET",
+                headers={"Accept": "application/json", "X-Admin-Secret": node.secret},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                if error.code == 403:
+                    raise PermissionError(f"node {node.name} rejected the admin secret") from error
+                raise
+
+            # The node states its own identity; we file rows under the name WE were configured
+            # with. Disagreement is worth surfacing -- it usually means a MONITOR_NODES url
+            # points at a different box than its name claims -- but the configured name still
+            # wins, so a service cannot choose which host's rows it is written into.
+            claimed = str(payload.get("node") or "")
+            if claimed and claimed != node.name and not warned_about_name:
+                # Once per sync, not once per batch: a catch-up pass makes many requests and
+                # the mismatch is a property of the node, not of the batch.
+                warned_about_name = True
+                LOGGER.warning(
+                    "node %s reports its own name as %r; storing under the configured name",
+                    node.name, claimed,
+                )
+
+            lines = payload.get("lines") or []
+            entries: list[LogEntry] = []
+            for raw in lines:
+                entry = self.parser.parse_line(str(raw))
                 if entry is None:
                     failures += 1
                 else:
                     parsed += 1
                     entries.append(entry)
-        imported = self.repository.insert_entries(entries, key)
-        self.repository.update_source(
-            path=key,
-            inode=stat.st_ino,
-            size=stat.st_size,
-            mtime_ns=stat.st_mtime_ns,
-            offset=final_offset,
-            complete=False,
-            parse_failures=failures,
-        )
-        return imported, parsed, failures
+            imported += self.repository.insert_entries(entries, key, node.name)
 
-    def _sync_zip(
-        self, path: Path
-    ) -> tuple[tuple[int, int, int], set[str]]:
-        stat = path.stat()
-        imported = 0
-        parsed = 0
-        failures = 0
-        source_keys: set[str] = set()
-        with zipfile.ZipFile(path) as archive:
-            for member in archive.namelist():
-                key = f"zip://{path.resolve()}!{member}"
-                source_keys.add(key)
-                state = self.repository.source_state(key)
-                if (
-                    state is not None
-                    and bool(state["complete"])
-                    and int(state["size"]) == stat.st_size
-                    and int(state["mtime_ns"]) == stat.st_mtime_ns
-                ):
-                    continue
-                entries: list[LogEntry] = []
-                member_failures = 0
-                with archive.open(member) as handle:
-                    for raw in handle:
-                        entry = self.parser.parse_line(raw.decode("utf-8", errors="replace"))
-                        if entry is None:
-                            member_failures += 1
-                        else:
-                            parsed += 1
-                            entries.append(entry)
-                imported += self.repository.insert_entries(entries, key)
-                failures += member_failures
-                self.repository.update_source(
-                    path=key,
-                    inode=stat.st_ino,
-                    size=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                    offset=stat.st_size,
-                    complete=True,
-                    parse_failures=member_failures,
-                )
-        return (imported, parsed, failures), source_keys
+            next_cursor = str(payload.get("next_cursor") or "")
+            # Persist after each batch, not once at the end: a crash mid-catch-up then costs
+            # one batch of re-reads (which the fingerprint dedup absorbs) instead of
+            # restarting the whole backlog.
+            if next_cursor and next_cursor != cursor:
+                cursor = next_cursor
+                self.repository.set_node_cursor(key, cursor, failures)
+            if not lines or not next_cursor:
+                break
+        return imported, parsed, failures

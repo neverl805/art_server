@@ -1,5 +1,5 @@
 """Database layer exports."""
 
-from .monitor import CleanupResult, LogIngestor, MonitorRepository
+from .monitor import CleanupResult, MonitorRepository, RemoteLogIngestor
 
-__all__ = ["CleanupResult", "LogIngestor", "MonitorRepository"]
+__all__ = ["CleanupResult", "MonitorRepository", "RemoteLogIngestor"]

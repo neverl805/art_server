@@ -19,7 +19,7 @@ from typing import Any, Iterable
 
 from app.database.monitor import (
     CleanupResult,
-    LogIngestor,
+    RemoteLogIngestor,
     MonitorRepository,
     SOLVE_PATHS,
     SyncResult,
@@ -75,7 +75,7 @@ class MonitorService:
     def __init__(
         self,
         *,
-        log_dir: Path,
+        nodes,
         monitor_database: Path,
         service_database: Path,
         service_url: str,
@@ -83,8 +83,11 @@ class MonitorService:
         probe_timeout_seconds: float = 1,
         retention_days: int = 2,
         stale_request_seconds: int = 240,
+        ingest_batch_lines: int = 2000,
+        ingest_timeout_seconds: float = 10.0,
+        ingest_max_batches: int = 20,
     ) -> None:
-        self.log_dir = log_dir
+        self.nodes = tuple(nodes)
         self.service_database = service_database
         self.service_url = service_url
         self.service_admin_secret = service_admin_secret
@@ -92,7 +95,13 @@ class MonitorService:
         self.retention_days = max(1, retention_days)
         self.stale_request_seconds = max(30, stale_request_seconds)
         self.repository = MonitorRepository(monitor_database)
-        self.ingestor = LogIngestor(log_dir, self.repository)
+        self.ingestor = RemoteLogIngestor(
+            self.nodes,
+            self.repository,
+            batch_lines=ingest_batch_lines,
+            timeout_seconds=ingest_timeout_seconds,
+            max_batches=ingest_max_batches,
+        )
         self._sync_lock = threading.Lock()
 
     def sync(self) -> SyncResult:
@@ -278,6 +287,12 @@ class MonitorService:
         if not params.include_non_solve:
             clauses.append("r.path IN (?, ?)")
             values.extend(SOLVE_PATHS)
+        if params.host:
+            # Exact match, unlike the LIKE filters around it: a node name is an identifier we
+            # configured, not free text a user is searching within, and a substring match on
+            # it would make "154" also select a node called "154-standby".
+            clauses.append("r.host = ?")
+            values.append(params.host)
         if params.request_id:
             clauses.append("r.request_id LIKE ?")
             values.append(f"%{params.request_id}%")
@@ -504,13 +519,12 @@ class MonitorService:
         )
 
     def get_source_status(self) -> SourceStatus:
-        source_files = self.ingestor.source_files()
+        # Sources are remote nodes now, so there is no local byte count to report: the log
+        # files live on the machines that wrote them and the monitor only ever holds its own
+        # index. `source_bytes` stays in the response shape (the client reads it) and is
+        # reported as 0 rather than removed, which is honest -- the monitor stores no source
+        # bytes at all.
         source_bytes = 0
-        for path in source_files:
-            try:
-                source_bytes += path.stat().st_size
-            except FileNotFoundError:
-                pass
         with self.repository.connection() as connection:
             source = connection.execute(
                 """
@@ -525,9 +539,9 @@ class MonitorService:
                 "SELECT value FROM monitor_state WHERE key = 'last_sync_at'"
             ).fetchone()
         return SourceStatus(
-            log_dir=str(self.log_dir),
+            log_dir=", ".join(f"{node.name}={node.url}" for node in self.nodes),
             database_path=str(self.repository.path),
-            source_files=len(source_files),
+            source_files=len(self.nodes),
             indexed_logs=int(logs["count"]),
             parse_failures=int(source["failures"]),
             retention_days=self.retention_days,

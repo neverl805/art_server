@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
-import zipfile
 from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
@@ -112,6 +113,96 @@ def payload_message(event: str, payload: dict[str, object]) -> str:
     return f"{event} payload=" + json.dumps(payload, separators=(",", ":"))
 
 
+
+class FakeNode:
+    """An in-process stand-in for one hCaptcha service's `/admin/events`.
+
+    The monitor no longer reads files, so the fixture cannot be a directory any more: it has
+    to be something that answers the endpoint. Keeping it in-process (rather than mocking the
+    ingestor) means the tests still exercise the real HTTP path, the real cursor handshake and
+    the real admin-secret check, which is where multi-node ingestion can actually go wrong.
+
+    The cursor is `lines:<index>`, not the service's `<file>:<offset>`. The ingestor treats it
+    as opaque and must never parse it -- using a deliberately different shape here is what
+    proves that.
+    """
+
+    def __init__(self, name: str, secret: str = "fixture-secret") -> None:
+        self.name = name
+        self.secret = secret
+        self.lines: list[str] = []
+        self.requests = 0
+        self._lock = threading.Lock()
+        node = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args) -> None:  # keep the test output clean
+                pass
+
+            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
+                from urllib.parse import parse_qs, urlparse
+
+                parsed = urlparse(self.path)
+                if parsed.path != "/admin/events":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                if self.headers.get("X-Admin-Secret") != node.secret:
+                    body = json.dumps({"code": 403, "message": "admin secret is invalid"}).encode()
+                    self.send_response(403)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                query = parse_qs(parsed.query)
+                since = query.get("since", [""])[0]
+                limit = int(query.get("limit", ["2000"])[0])
+                start = int(since.split(":", 1)[1]) if since.startswith("lines:") else 0
+                with node._lock:
+                    node.requests += 1
+                    chunk = node.lines[start:start + limit]
+                    total = len(node.lines)
+                body = json.dumps({
+                    "code": 200,
+                    "node": node.name,
+                    "lines": chunk,
+                    "next_cursor": f"lines:{min(start + len(chunk), total)}",
+                    "eof": not chunk,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def emit(self, *lines: str) -> None:
+        with self._lock:
+            self.lines.extend(line.rstrip("\n") for line in lines)
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class Node:
+    """Mirrors `config.Node` without importing it, so a config change cannot silently
+    invalidate what these tests think they are passing in."""
+
+    def __init__(self, name: str, url: str, secret: str) -> None:
+        self.name = name
+        self.url = url
+        self.secret = secret
+
+
 class MonitorTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -121,10 +212,11 @@ class MonitorTest(unittest.TestCase):
         self.log_dir.mkdir(parents=True)
         self.data_dir.mkdir(parents=True)
         self.monitor_database = Path(self.temp.name) / "monitor.db"
+        self.node = FakeNode("node-a")
         self._write_sources()
         self._write_token_database()
         self.service = MonitorService(
-            log_dir=self.log_dir,
+            nodes=(Node("node-a", self.node.url, self.node.secret),),
             monitor_database=self.monitor_database,
             service_database=self.data_dir / "service.db",
             service_url="http://127.0.0.1:9",
@@ -133,6 +225,7 @@ class MonitorTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.node.close()
         self.temp.cleanup()
 
     def _write_sources(self) -> None:
@@ -218,9 +311,7 @@ class MonitorTest(unittest.TestCase):
                 "status=200 elapsed_ms=2020.000",
             ),
         ]
-        archive = self.log_dir / "application_previous.log.zip"
-        with zipfile.ZipFile(archive, "w") as bundle:
-            bundle.writestr("application_previous.log", "".join(success_lines))
+        self.node.emit(*success_lines)
 
         failed = started + timedelta(minutes=1)
         failure_lines = [
@@ -301,9 +392,7 @@ class MonitorTest(unittest.TestCase):
                 "status=502 elapsed_ms=3020.000",
             ),
         ]
-        (self.log_dir / "application_current.log").write_text(
-            "".join(failure_lines), encoding="utf-8"
-        )
+        self.node.emit(*failure_lines)
 
     def _write_token_database(self) -> None:
         with closing(sqlite3.connect(self.data_dir / "service.db")) as connection:
@@ -328,7 +417,7 @@ class MonitorTest(unittest.TestCase):
             )
             connection.commit()
 
-    def test_incremental_sync_is_idempotent_and_indexes_archives(self) -> None:
+    def test_incremental_sync_resumes_from_the_node_cursor(self) -> None:
         first = self.service.sync()
         second = self.service.sync()
 
@@ -343,30 +432,31 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(overview.token_usage.pending, 1)
         self.assertEqual(overview.token_usage.tokens[0].token, "full-token")
 
-        active_log = self.log_dir / "application_current.log"
-        with active_log.open("a", encoding="utf-8") as handle:
-            handle.write(
-                log_line(
-                    datetime.now(),
-                    "INFO",
-                    "health-request",
-                    "request started method=GET path=/health",
-                )
+        # New events on the node are picked up, and only once.
+        self.node.emit(
+            log_line(
+                datetime.now(),
+                "INFO",
+                "health-request",
+                "request started method=GET path=/health",
             )
+        )
         appended = self.service.sync()
         repeated = self.service.sync()
         self.assertEqual(appended.imported, 1)
         self.assertEqual(repeated.imported, 0)
 
-        archive = self.log_dir / "application_previous.log.zip"
-        archive_key = f"zip://{archive.resolve()}!application_previous.log"
-        self.assertIsNotNone(self.service.repository.source_state(archive_key))
-        archive.unlink()
+        # The cursor is persisted per node under an opaque key, and is whatever the NODE said
+        # it was -- the monitor must never construct or interpret it.
+        state = self.service.repository.source_state("node://node-a")
+        self.assertIsNotNone(state)
+        self.assertEqual(state["cursor"], f"lines:{len(self.node.lines)}")
 
-        pruned = self.service.sync()
-
-        self.assertEqual(pruned.pruned_sources, 1)
-        self.assertIsNone(self.service.repository.source_state(archive_key))
+        # A sync with nothing new must still not re-fetch from zero: the request count grows
+        # by a bounded amount, not by the whole backlog.
+        before = self.node.requests
+        self.service.sync()
+        self.assertLessEqual(self.node.requests - before, 2)
 
     def test_search_and_detail_expose_hcaptcha_fields(self) -> None:
         self.service.sync()
@@ -417,14 +507,13 @@ class MonitorTest(unittest.TestCase):
 
     def test_monitor_retention_removes_old_log_and_request_rows(self) -> None:
         old = datetime.now() - timedelta(days=3)
-        (self.log_dir / "application_old.log").write_text(
+        self.node.emit(
             log_line(
                 old,
                 "INFO",
                 "old-request",
                 "request started method=POST path=/get_hcaptcha_key",
-            ),
-            encoding="utf-8",
+            )
         )
 
         result = self.service.sync()
@@ -434,20 +523,19 @@ class MonitorTest(unittest.TestCase):
 
     def test_stale_in_progress_request_is_marked_interrupted(self) -> None:
         stale = datetime.now() - timedelta(minutes=10)
-        (self.log_dir / "application_stale.log").write_text(
+        self.node.emit(
             log_line(
                 stale,
                 "INFO",
                 "stale-request",
                 "request started method=POST path=/get_hcaptcha_key",
-            )
-            + log_line(
+            ),
+            log_line(
                 stale + timedelta(seconds=1),
                 "INFO",
                 "stale-request",
                 "token reserved hint=***oken remaining=8 pending=1",
             ),
-            encoding="utf-8",
         )
 
         result = self.service.sync()
@@ -474,30 +562,24 @@ class MonitorTest(unittest.TestCase):
         )
         self.assertIsNone(self.service.get_request_detail("success-request"))
 
+        # After a manual clear the node keeps serving from where the cursor left off, so a
+        # replay is a line that arrives AFTER the cutoff but is stamped BEFORE it. It must be
+        # rejected on its timestamp, while a genuinely new line is still accepted.
         old = datetime.now() - timedelta(minutes=10)
-        with zipfile.ZipFile(
-            self.log_dir / "application_replayed.log.zip", "w"
-        ) as bundle:
-            bundle.writestr(
-                "application_replayed.log",
-                log_line(
-                    old,
-                    "INFO",
-                    "replayed-request",
-                    "request started method=POST path=/get_hcaptcha_key",
-                ),
-            )
-        with (self.log_dir / "application_current.log").open(
-            "a", encoding="utf-8"
-        ) as handle:
-            handle.write(
-                log_line(
-                    datetime.now() + timedelta(milliseconds=10),
-                    "INFO",
-                    "new-request",
-                    "request started method=POST path=/get_hcaptcha_key",
-                )
-            )
+        self.node.emit(
+            log_line(
+                old,
+                "INFO",
+                "replayed-request",
+                "request started method=POST path=/get_hcaptcha_key",
+            ),
+            log_line(
+                datetime.now() + timedelta(milliseconds=10),
+                "INFO",
+                "new-request",
+                "request started method=POST path=/get_hcaptcha_key",
+            ),
+        )
 
         self.service.sync()
 
@@ -511,6 +593,10 @@ class MonitorTest(unittest.TestCase):
             sync_interval_seconds=60,
             service_url="http://127.0.0.1:9",
             service_probe_timeout_seconds=0.05,
+            # Without this the app falls back to the default local node and the whole API
+            # surface reports zeroes -- which is exactly what a misconfigured MONITOR_NODES
+            # looks like in production, so it is worth the test pinning it explicitly.
+            nodes=(Node("node-a", self.node.url, self.node.secret),),
         )
         with TestClient(create_app(settings)) as client:
             overview = client.get("/api/logs/overview?hours=24")
@@ -610,3 +696,97 @@ class MonitorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiNodeTest(unittest.TestCase):
+    """The behaviours that only exist once there is more than one node.
+
+    The single-node suite above cannot see any of these: host attribution is trivially correct
+    with one host, a dedup collision needs two producers, and "one node down" is not a state a
+    one-node deployment has.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.database = Path(self.temp.name) / "monitor.db"
+        self.node_a = FakeNode("node-a")
+        self.node_b = FakeNode("node-b")
+        self.service = MonitorService(
+            nodes=(
+                Node("node-a", self.node_a.url, self.node_a.secret),
+                Node("node-b", self.node_b.url, self.node_b.secret),
+            ),
+            monitor_database=self.database,
+            service_database=Path(self.temp.name) / "service.db",
+            service_url="http://127.0.0.1:9",
+            probe_timeout_seconds=0.05,
+        )
+
+    def tearDown(self) -> None:
+        self.node_a.close()
+        self.node_b.close()
+        self.temp.cleanup()
+
+    def _started(self, request_id: str, when: datetime) -> str:
+        return log_line(when, "INFO", request_id, "request started method=POST path=/get_hcaptcha_key")
+
+    def test_rows_are_attributed_to_the_node_they_came_from(self) -> None:
+        now = datetime.now()
+        self.node_a.emit(self._started("req-a", now))
+        self.node_b.emit(self._started("req-b", now))
+
+        self.service.sync()
+
+        with self.service.repository.connection() as connection:
+            hosts = {
+                row["request_id"]: row["host"]
+                for row in connection.execute("SELECT request_id, host FROM request_summaries")
+            }
+        self.assertEqual(hosts, {"req-a": "node-a", "req-b": "node-b"})
+
+    def test_an_identical_line_from_two_nodes_is_two_events(self) -> None:
+        """The dedup fingerprint must include the host.
+
+        `log_entries.fingerprint` is UNIQUE and was hashed from the raw line alone. Most lines
+        carry a uuid request id and could never collide, but SYSTEM-scoped ones carry no
+        per-request entropy at all -- so with two nodes, the same startup line would silently
+        drop one node's copy and the panel would under-report that node.
+        """
+        identical = log_line(
+            datetime.now(), "INFO", "SYSTEM", "request started method=GET path=/health"
+        )
+        self.node_a.emit(identical)
+        self.node_b.emit(identical)
+
+        self.service.sync()
+
+        with self.service.repository.connection() as connection:
+            rows = connection.execute(
+                "SELECT host FROM log_entries WHERE message LIKE '%path=/health%'"
+            ).fetchall()
+        self.assertEqual(sorted(row["host"] for row in rows), ["node-a", "node-b"])
+
+    def test_one_unreachable_node_does_not_stop_the_others(self) -> None:
+        now = datetime.now()
+        self.node_a.emit(self._started("req-a", now))
+        self.node_b.emit(self._started("req-b", now))
+        self.node_b.close()  # node-b is now refusing connections
+
+        result = self.service.sync()
+
+        self.assertEqual(result.source_files, 1, "only the reachable node should be counted")
+        self.assertIsNotNone(self.service.get_request_detail("req-a"))
+        # node-b's cursor must be untouched, so it resumes rather than restarts when it returns.
+        self.assertIsNone(self.service.repository.source_state("node://node-b"))
+
+    def test_a_wrong_admin_secret_fails_that_node_only(self) -> None:
+        now = datetime.now()
+        self.node_a.emit(self._started("req-a", now))
+        self.node_b.emit(self._started("req-b", now))
+        self.node_b.secret = "rotated-out-of-band"
+
+        result = self.service.sync()
+
+        self.assertEqual(result.source_files, 1)
+        self.assertIsNotNone(self.service.get_request_detail("req-a"))
+        self.assertIsNone(self.service.get_request_detail("req-b"))

@@ -36,7 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings or Settings()
     setup_logger()
     monitor = MonitorService(
-        log_dir=config.log_dir,
+        nodes=config.nodes,
         monitor_database=config.monitor_database,
         service_database=config.service_database,
         service_url=config.service_url,
@@ -44,6 +44,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         probe_timeout_seconds=config.service_probe_timeout_seconds,
         retention_days=config.retention_days,
         stale_request_seconds=config.stale_request_seconds,
+        ingest_batch_lines=config.ingest_batch_lines,
+        ingest_timeout_seconds=config.ingest_timeout_seconds,
+        ingest_max_batches=config.ingest_max_batches,
     )
 
     @asynccontextmanager
@@ -54,8 +57,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _sync_loop(monitor, stop, config.sync_interval_seconds)
         )
         logger.info(
-            "monitor started log_dir={} database={}",
-            config.log_dir,
+            "monitor started nodes=[{}] database={}",
+            ", ".join(f"{node.name}@{node.url}" for node in config.nodes),
             config.monitor_database,
         )
         try:

@@ -131,6 +131,9 @@ class LogGroup(BaseModel):
 
 
 class LogSearchParams(BaseModel):
+    #: Which node produced the request. `None` means every node, which is what the panel
+    #: showed before it had more than one and therefore stays the default.
+    host: str | None = None
     request_id: str | None = None
     outcome: RequestOutcome | None = None
     level: LogLevel | None = None

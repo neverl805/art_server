@@ -67,6 +67,7 @@ def get_overview(
 @router.get("/list", summary="Search hCaptcha requests")
 def get_request_list(
     request: Request,
+    host: str | None = None,
     request_id: str | None = None,
     outcome: RequestOutcome | None = None,
     level: LogLevel | None = None,
@@ -81,6 +82,7 @@ def get_request_list(
     page_size: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
     params = LogSearchParams(
+        host=host,
         request_id=request_id,
         outcome=outcome,
         level=level,
