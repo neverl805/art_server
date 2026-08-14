@@ -63,8 +63,34 @@ TRACE_COLUMNS: dict[str, str] = {
     "proxy_exit_ip": "TEXT",
     "proxy_asn": "TEXT",
     "proxy_isp": "TEXT",
+    "geo_pair_source": "TEXT",
     "locale_geo_match": "INTEGER",
     "timezone_geo_match": "INTEGER",
+    # The browser the session claimed to be. The service collected all of this from the
+    # materialized persona all along and simply never forwarded it, so the panel's
+    # "指纹与代理快照" showed an exit and a locale and nothing about the rendering identity —
+    # which is the half that distinguishes two personas leaving from the same address.
+    "safari_version": "TEXT",
+    "visible": "INTEGER",
+    "screen_width": "INTEGER",
+    "screen_height": "INTEGER",
+    "viewport_width": "INTEGER",
+    "viewport_height": "INTEGER",
+    "device_scale_factor": "REAL",
+    "color_depth": "INTEGER",
+    "hardware_concurrency": "INTEGER",
+    "device_memory_gb": "REAL",
+    "platform": "TEXT",
+    "architecture": "TEXT",
+    "max_touch_points": "INTEGER",
+    "canvas_salt": "TEXT",
+    "webgl_render_salt": "TEXT",
+    "webgl_unmasked_renderer": "TEXT",
+    "audio_offline_render_value": "TEXT",
+    "worker_stack_fingerprint": "TEXT",
+    "display_refresh_hz": "REAL",
+    "pointer_dispatch_hz": "REAL",
+    "timestamp_quantum_ms": "REAL",
     "trace_json": "TEXT",
 }
 
@@ -617,6 +643,13 @@ class MonitorRepository:
         if not isinstance(dimensions, dict):
             dimensions = {}
         attempt = max(1, int(payload.get("attempt") or 1))
+        # What makes two solves "the same fingerprint" for `get_fingerprint_clusters`. The
+        # device identity belongs here and was missing: `profile_id` names the persona but the
+        # canvas/WebGL/audio salts are what the target actually hashes, and two solves can
+        # share a persona id while differing there (the device-raster pool draws per session).
+        # `proxy_asn`/`proxy_isp` stay in the tuple but are `None` on every row the Rust
+        # service produces — it resolves the exit from the proxy string, never over the
+        # network — so they currently contribute nothing rather than being wrong.
         fingerprint_fields = (
             "profile_variant",
             "profile_id",
@@ -624,6 +657,10 @@ class MonitorRepository:
             "timezone",
             "hcaptcha_version",
             "vmdata_slots",
+            "safari_version",
+            "canvas_salt",
+            "webgl_render_salt",
+            "audio_offline_render_value",
             "proxy_country",
             "proxy_asn",
             "proxy_isp",
@@ -653,7 +690,7 @@ class MonitorRepository:
                 ),
             }
         )
-        bool_columns = {"locale_geo_match", "timezone_geo_match"}
+        bool_columns = {"locale_geo_match", "timezone_geo_match", "visible"}
         for key in bool_columns:
             if column_values.get(key) is not None:
                 column_values[key] = int(bool(column_values[key]))

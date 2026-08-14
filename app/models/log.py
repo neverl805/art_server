@@ -98,8 +98,35 @@ class FingerprintSnapshot(BaseModel):
     proxy_exit_ip: str | None = None
     proxy_asn: str | None = None
     proxy_isp: str | None = None
+    #: `"pool"` when the shipped (locale, timezone) came from the service's measured-good pair
+    #: pool — the default — and `"egress"` when it was derived from the exit. The two match
+    #: flags below only mean something in `"egress"` mode and are `None` otherwise: a pool draw
+    #: deliberately does not agree with the exit, so comparing them reported a mismatch on
+    #: every row and the panel painted all of them red.
+    geo_pair_source: str | None = None
     locale_geo_match: bool | None = None
     timezone_geo_match: bool | None = None
+    safari_version: str | None = None
+    visible: bool | None = None
+    screen_width: int | None = None
+    screen_height: int | None = None
+    viewport_width: int | None = None
+    viewport_height: int | None = None
+    device_scale_factor: float | None = None
+    color_depth: int | None = None
+    hardware_concurrency: int | None = None
+    device_memory_gb: float | None = None
+    platform: str | None = None
+    architecture: str | None = None
+    max_touch_points: int | None = None
+    canvas_salt: str | None = None
+    webgl_render_salt: str | None = None
+    webgl_unmasked_renderer: str | None = None
+    audio_offline_render_value: str | None = None
+    worker_stack_fingerprint: str | None = None
+    display_refresh_hz: float | None = None
+    pointer_dispatch_hz: float | None = None
+    timestamp_quantum_ms: float | None = None
 
 
 class LogGroup(BaseModel):

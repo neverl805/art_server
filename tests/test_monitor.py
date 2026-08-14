@@ -102,8 +102,32 @@ def trace_message(*, country: str, profile: str, success: bool) -> str:
             "proxy_timezone": "Europe/Berlin" if country == "DE" else "America/New_York",
             "proxy_asn": "64500",
             "proxy_isp": "Fixture ISP",
+            "geo_pair_source": "egress",
             "locale_geo_match": country == "US",
             "timezone_geo_match": True,
+            # The browser the session claimed to be. Carried by every trace since the service
+            # started forwarding `session_axes()`, and part of the shared fixture on purpose so
+            # every test that reads a trace also exercises these columns.
+            "safari_version": "26.6.1",
+            "visible": False,
+            "screen_width": 1512,
+            "screen_height": 982,
+            "viewport_width": 1324,
+            "viewport_height": 825,
+            "device_scale_factor": 2.0,
+            "color_depth": 24,
+            "hardware_concurrency": 8,
+            "platform": "MacIntel",
+            "architecture": "arm64",
+            "max_touch_points": 0,
+            "canvas_salt": "c0ffee",
+            "webgl_render_salt": "beef",
+            "webgl_unmasked_renderer": "Apple GPU",
+            "audio_offline_render_value": "167523.487483018",
+            "worker_stack_fingerprint": "[24.0,4196,3147]",
+            "display_refresh_hz": 60.0,
+            "pointer_dispatch_hz": 60.0,
+            "timestamp_quantum_ms": 1.0,
         },
         "error": None if success else "fixture timeout",
     }
@@ -479,6 +503,31 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(detail.trace_metrics.http_total_ms, 1200)
         self.assertEqual(detail.trace_metrics.queue_wait_ms, 45.25)
         self.assertEqual(detail.fingerprint.proxy_country, "DE")
+        # The rendering identity has to survive the whole trip -- trace event, column, model.
+        # It was collected by the service and dropped on the floor at the payload boundary, so
+        # the panel's fingerprint card showed an exit and a locale and nothing about the
+        # browser, which is what an operator is actually trying to tell two personas apart by.
+        self.assertEqual(detail.fingerprint.safari_version, "26.6.1")
+        self.assertEqual(detail.fingerprint.screen_width, 1512)
+        self.assertEqual(detail.fingerprint.viewport_width, 1324)
+        self.assertEqual(detail.fingerprint.device_scale_factor, 2.0)
+        self.assertEqual(detail.fingerprint.hardware_concurrency, 8)
+        self.assertEqual(detail.fingerprint.platform, "MacIntel")
+        self.assertEqual(detail.fingerprint.canvas_salt, "c0ffee")
+        self.assertEqual(detail.fingerprint.webgl_unmasked_renderer, "Apple GPU")
+        self.assertEqual(
+            detail.fingerprint.audio_offline_render_value, "167523.487483018"
+        )
+        self.assertEqual(
+            detail.fingerprint.worker_stack_fingerprint, "[24.0,4196,3147]"
+        )
+        self.assertEqual(detail.fingerprint.display_refresh_hz, 60.0)
+        # Stored as an INTEGER, surfaced as a bool -- and `False` must survive as `False`
+        # rather than collapsing into the "not measured" case the way `None` does.
+        self.assertIs(detail.fingerprint.visible, False)
+        # Absent from the trace because real Safari does not expose it. It must stay absent
+        # rather than arrive as 0, which would read as a measured zero.
+        self.assertIsNone(detail.fingerprint.device_memory_gb)
         request_log = next(
             entry for entry in detail.logs if entry.event == "request_payload"
         )

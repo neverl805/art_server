@@ -64,6 +64,33 @@ CLUSTER_DIMENSIONS = {
 }
 
 
+#: Stored as SQLite integers, surfaced as booleans.
+_BOOL_FINGERPRINT_FIELDS = frozenset(
+    {"locale_geo_match", "timezone_geo_match", "visible"}
+)
+
+
+def _fingerprint_from_row(row: sqlite3.Row) -> FingerprintSnapshot:
+    """Project a `request_summaries` row onto the fingerprint model.
+
+    Driven by the model's own field names rather than a hand-written assignment per column,
+    because the hand-written version is what let the panel drift: a dimension could be added
+    to `TRACE_COLUMNS`, stored correctly, and still render blank forever because the third
+    edit — this mapping — was missed, and a blank field looks exactly like an unmeasured one.
+    Field name and column name are now required to agree, and nothing else is required at all.
+    """
+    columns = set(row.keys())
+    values: dict[str, Any] = {}
+    for name in FingerprintSnapshot.model_fields:
+        if name not in columns:
+            continue
+        value = row[name]
+        if value is None:
+            continue
+        values[name] = bool(value) if name in _BOOL_FINGERPRINT_FIELDS else value
+    return FingerprintSnapshot(**values)
+
+
 class TokenAdminError(Exception):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
@@ -650,42 +677,7 @@ class MonitorService:
                     row["sandbox_peak_memory_bytes"] or 0
                 ),
             ),
-            fingerprint=FingerprintSnapshot(
-                fingerprint_key=row["fingerprint_key"],
-                profile_variant=row["profile_variant"],
-                profile_id=row["profile_id"],
-                locale=row["locale"],
-                timezone=row["timezone"],
-                hcaptcha_version=row["hcaptcha_version"],
-                vmdata_length=row["vmdata_length"],
-                vmdata_slots=row["vmdata_slots"],
-                n_length=row["n_length"],
-                request_type=row["request_type"],
-                task_count=row["task_count"],
-                proxy_scheme=row["proxy_scheme"],
-                proxy_host=row["proxy_host"],
-                proxy_port=row["proxy_port"],
-                proxy_endpoint=row["proxy_endpoint"],
-                proxy_endpoint_key=row["proxy_endpoint_key"],
-                proxy_session_mode=row["proxy_session_mode"],
-                proxy_country=row["proxy_country"],
-                proxy_city=row["proxy_city"],
-                proxy_timezone=row["proxy_timezone"],
-                proxy_geo_source=row["proxy_geo_source"],
-                proxy_exit_ip=row["proxy_exit_ip"],
-                proxy_asn=row["proxy_asn"],
-                proxy_isp=row["proxy_isp"],
-                locale_geo_match=(
-                    bool(row["locale_geo_match"])
-                    if row["locale_geo_match"] is not None
-                    else None
-                ),
-                timezone_geo_match=(
-                    bool(row["timezone_geo_match"])
-                    if row["timezone_geo_match"] is not None
-                    else None
-                ),
-            ),
+            fingerprint=_fingerprint_from_row(row),
             spans=(
                 self._spans_for_request(str(row["request_id"]))
                 if include_spans
