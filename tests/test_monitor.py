@@ -6,7 +6,7 @@ import tempfile
 import threading
 import json
 import unittest
-from contextlib import closing
+from contextlib import closing, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -883,3 +883,45 @@ class TimestampPrecisionTest(unittest.TestCase):
 
         line = json.dumps({"ts": "not-a-time", "level": "INFO", "event": "e", "data": {}})
         self.assertIsNone(LogParser.parse_line(line))
+
+
+class SyncLoopTest(unittest.TestCase):
+    """The background pull has to survive its own interval timer.
+
+    `asyncio.wait_for` raises `asyncio.TimeoutError`, which is the builtin `TimeoutError` only
+    from Python 3.11. On 3.10 the two are unrelated, so catching the builtin let the timeout
+    escape and killed the task after exactly one sync -- silently, because nothing awaits it.
+    The panel then showed an empty list while every health check stayed green.
+
+    Read the guarantee honestly: this asserts the invariant (the loop repeats) on every
+    interpreter, but it can only FAIL on 3.10, because on 3.11+ the pre-fix code was already
+    correct. It was run against the pre-fix source on the 3.10 deployment host, where it fails,
+    which is the only place the claim can be checked at all.
+    """
+
+    def test_the_loop_keeps_syncing_across_several_intervals(self) -> None:
+        import asyncio
+
+        from main import _sync_loop
+
+        calls = 0
+
+        class CountingMonitor:
+            def sync(self) -> None:
+                nonlocal calls
+                calls += 1
+
+        async def drive() -> None:
+            stop = asyncio.Event()
+            task = asyncio.create_task(_sync_loop(CountingMonitor(), stop, 0.01))
+            await asyncio.sleep(0.2)
+            running = not task.done()
+            stop.set()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            # On the pre-fix code the task is already finished here, having synced exactly once.
+            self.assertTrue(running, "the sync loop died before it was asked to stop")
+
+        asyncio.run(drive())
+        self.assertGreater(calls, 1, f"the loop synced {calls} time(s); it must repeat")

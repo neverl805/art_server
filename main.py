@@ -21,15 +21,32 @@ from config import Settings
 async def _sync_loop(
     monitor: MonitorService, stop: asyncio.Event, interval_seconds: float
 ) -> None:
-    while not stop.is_set():
-        try:
-            await asyncio.to_thread(monitor.sync)
-        except Exception:
-            logger.exception("background log sync failed")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
-        except TimeoutError:
-            pass
+    """Pull from every node every `interval_seconds` until shutdown.
+
+    `asyncio.TimeoutError`, not the builtin `TimeoutError`. They are the same class only from
+    Python 3.11; on 3.10 they are unrelated, so `except TimeoutError` did not catch the wait's
+    timeout, the exception escaped the loop, and the task died on its very first interval —
+    after exactly one sync. Nothing said so: the task is never awaited, so the traceback went
+    nowhere, and the panel simply stopped gaining rows while every health check stayed green.
+    The monitor moved from a 3.14 host to a 3.10 one, and this is the second incompatibility
+    that move surfaced (the first was `datetime.fromisoformat` rejecting nanoseconds).
+
+    The outer handler exists because that silence is the real defect. A loop that stops has to
+    say so; an empty log list looks identical to a quiet service.
+    """
+    try:
+        while not stop.is_set():
+            try:
+                await asyncio.to_thread(monitor.sync)
+            except Exception:
+                logger.exception("background log sync failed")
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        logger.exception("background log sync loop exited; the panel will stop updating")
+        raise
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
