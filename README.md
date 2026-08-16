@@ -57,3 +57,28 @@ python -m unittest discover -s tests -v
 ```
 
 索引异常时停止服务并删除 `data/monitor.db`，下一次启动会从仍在保留期内的原始日志完整重建。原始日志的删除与压缩继续由 hCaptcha 服务的 Loguru retention 配置负责。
+
+## 部署
+
+服务本体用 supervisor 启动，**必须走 `start.sh`**，不要直接跑 `uvicorn`：`.env` 是
+`start.sh` 加载的，绕过它服务会带着一套默认值静静起来（`nodes=[local@:43333]`、
+`database=data/monitor.db`），健康检查全绿而面板显示全零。这个坑踩过一次。
+
+前端是独立仓库 `art-design-pro`，构建产物才是被 nginx 服务的东西。**构建时不要在命令行
+覆盖 `VITE_*`** —— `.env.production` 是权威，覆盖不会报错，只会产出一个能加载但所有接口
+都 404 的包（页面正常打开、数据全空，看起来像后端故障）。完整说明和验证方法在那个仓库的
+README「Deployment」一节。
+
+换前端后要验的是 **API 而不是页面**，页面能打开不能证明接口对：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://<host>/hcp_solver/api/logs/overview   # 200
+```
+
+跨解释器兼容两处值得记住，都是把面板从 3.14 机器搬到 3.10 机器时炸出来的，而且症状都不
+指向真正的原因：`datetime.fromisoformat` 在 3.11 之前只接受 3 或 6 位小数，而服务写的是
+**纳秒**（9 位），于是每一行都解析失败，唯一的信号是 `parse_failures` 上升伴随
+`imported: 0` —— 读起来像输入损坏，不像解释器差异。以及 `asyncio.TimeoutError` 只有从
+3.11 起才等同于内建的 `TimeoutError`，写成 `except TimeoutError` 在 3.10 上抓不住，同步
+任务在第一个间隔后就死了，而它从不被 await，异常没有任何去处。两处都已修在解析器和循环
+里，不靠钉死解释器版本。
