@@ -132,6 +132,11 @@ class FingerprintSnapshot(BaseModel):
 class LogGroup(BaseModel):
     request_id: str
     session_id: str
+    #: Which NODE served this request -- the `host` column, the same value `LogSearchParams.host`
+    #: filters on. Named `node` here because `target_host` in this same model is the captcha
+    #: target (`steamcommunity.com`), and one model carrying two different meanings of "host" is
+    #: how a field gets read as the wrong thing.
+    node: str | None = None
     count: int
     start_time: datetime
     end_time: datetime
@@ -148,6 +153,11 @@ class LogGroup(BaseModel):
     upstream_requests: int | None = None
     direct: bool | None = None
     token_hint: str | None = None
+    #: The token in full, resolved from the ledger at render time -- the log files keep only
+    #: `token_hint`. There is no name column on `api_tokens`, so the token itself is the only
+    #: thing that identifies a caller, and a masked suffix cannot do that when several tokens
+    #: end alike. `None` when the ledger is unreadable or the token has since been deleted.
+    token_value: str | None = None
     token_remaining: int | None = None
     token_used: int | None = None
     error: str | None = None

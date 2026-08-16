@@ -527,6 +527,48 @@ class MonitorService:
             clusters=clusters[:100],
         )
 
+    #: `token_hint` -> full token, rebuilt at most this often. The ledger changes when an
+    #: operator adds or removes a token, which is rare next to the rate this is read at.
+    _TOKEN_MAP_TTL_SECONDS = 30.0
+
+    def _token_for_hint(self, hint: object) -> str | None:
+        """Resolve a masked hint back to the token that produced it.
+
+        The service logs only the hint, deliberately -- log files are copied around and a raw
+        token in one is a working credential. The panel already displays plaintext tokens on
+        its own token page from this same read-only ledger, so resolving here moves nothing
+        new out of the box; it just stops the request list from being unattributable.
+
+        A hint is a suffix, so it is not guaranteed unique. When two tokens share one, this
+        returns `None` rather than naming the wrong customer -- a blank is recoverable, a
+        confident wrong answer is not.
+        """
+        if not hint:
+            return None
+        now = time.time()
+        cached = getattr(self, "_token_map", None)
+        if cached is None or now - cached[0] > self._TOKEN_MAP_TTL_SECONDS:
+            mapping: dict[str, str | None] = {}
+            if self.service_database.is_file():
+                uri = f"file:{self.service_database}?mode=ro"
+                try:
+                    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as connection:
+                        connection.row_factory = sqlite3.Row
+                        for row in connection.execute(
+                            "SELECT token_hint, token_value FROM api_tokens"
+                        ):
+                            key = str(row["token_hint"])
+                            value = row["token_value"]
+                            # Second sighting of a hint means it cannot identify anyone.
+                            mapping[key] = None if key in mapping else (
+                                str(value) if value is not None else None
+                            )
+                except (sqlite3.Error, OSError):
+                    mapping = {}
+            cached = (now, mapping)
+            self._token_map = cached
+        return cached[1].get(str(hint))
+
     def get_token_usage(self) -> TokenUsage:
         if not self.service_database.is_file():
             return TokenUsage(available=False)
@@ -644,9 +686,11 @@ class MonitorService:
             levels = dict(Counter(log.level.value for log in logs))
         else:
             levels = {}
+        columns = set(row.keys())
         return LogGroup(
             request_id=str(row["request_id"]),
             session_id=str(row["session_id"]),
+            node=(row["host"] if "host" in columns else None),
             count=int(row["log_count"]),
             start_time=datetime.fromisoformat(row["started_at"]),
             end_time=datetime.fromisoformat(row["ended_at"]),
@@ -663,6 +707,7 @@ class MonitorService:
             upstream_requests=row["upstream_requests"],
             direct=bool(row["direct"]) if row["direct"] is not None else None,
             token_hint=row["token_hint"],
+            token_value=self._token_for_hint(row["token_hint"]),
             token_remaining=row["token_remaining"],
             token_used=row["token_used"],
             error=row["error"],
