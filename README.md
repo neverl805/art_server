@@ -89,4 +89,4 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<host>/hcp_solver/api/logs/overv
 和本机 Go admin secret，余额与管理操作均通过 Go `/admin/tokens`。此模式在 API 失败
 时报告不可用，绝不回退读取停用的 SQLite 快照。`MONITOR_NODES` 只配置当前 189、82，
 私有 TLS 事件源通过该进程的 `SSL_CERT_FILE` 信任 peer CA。Go schema 2 平铺 trace
-与保留 Rust payload trace 均可解析。前端入口必须有真正的服务端访问认证。
+与保留 Rust payload trace 均可解析。189/82 的监控入口按用户要求直接访问，不设置页面登录或 Nginx Basic Auth。
