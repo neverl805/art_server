@@ -58,6 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         service_database=config.service_database,
         service_url=config.service_url,
         service_admin_secret=config.service_admin_secret,
+        ledger_backend=config.ledger_backend,
         probe_timeout_seconds=config.service_probe_timeout_seconds,
         retention_days=config.retention_days,
         stale_request_seconds=config.stale_request_seconds,

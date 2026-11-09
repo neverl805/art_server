@@ -627,6 +627,8 @@ class MonitorRepository:
             )
         elif entry.event == "hcaptcha_trace":
             payload = attrs.get("payload")
+            if not isinstance(payload, dict) and isinstance(attrs.get("timing"), dict):
+                payload = attrs  # Go schema 2 logs the trace fields directly.
             if isinstance(payload, dict):
                 self._update_trace(connection, entry.request_id, payload)
 

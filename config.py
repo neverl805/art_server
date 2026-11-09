@@ -105,6 +105,7 @@ class Settings:
         "HCAPTCHA_SERVICE_URL", "http://127.0.0.1:43333"
     ).rstrip("/")
     service_admin_secret: str = os.getenv("HCAPTCHA_ADMIN_SECRET", "")
+    ledger_backend: str = os.getenv("HCAPTCHA_LEDGER_BACKEND", "sqlite")
     service_probe_timeout_seconds: float = float(
         os.getenv("HCAPTCHA_PROBE_TIMEOUT_SECONDS", "1")
     )

@@ -82,3 +82,11 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<host>/hcp_solver/api/logs/overv
 3.11 起才等同于内建的 `TimeoutError`，写成 `except TimeoutError` 在 3.10 上抓不住，同步
 任务在第一个间隔后就死了，而它从不被 await，异常没有任何去处。两处都已修在解析器和循环
 里，不靠钉死解释器版本。
+
+## Go 主账本部署
+
+189 主部署设置 `HCAPTCHA_LEDGER_BACKEND=go`、`HCAPTCHA_SERVICE_URL=http://127.0.0.1:43338`
+和本机 Go admin secret，余额与管理操作均通过 Go `/admin/tokens`。此模式在 API 失败
+时报告不可用，绝不回退读取停用的 SQLite 快照。`MONITOR_NODES` 只配置当前 189、82，
+私有 TLS 事件源通过该进程的 `SSL_CERT_FILE` 信任 peer CA。Go schema 2 平铺 trace
+与保留 Rust payload trace 均可解析。前端入口必须有真正的服务端访问认证。

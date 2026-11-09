@@ -107,6 +107,7 @@ class MonitorService:
         service_database: Path,
         service_url: str,
         service_admin_secret: str = "",
+        ledger_backend: str = "sqlite",
         probe_timeout_seconds: float = 1,
         retention_days: int = 2,
         stale_request_seconds: int = 240,
@@ -118,6 +119,9 @@ class MonitorService:
         self.service_database = service_database
         self.service_url = service_url
         self.service_admin_secret = service_admin_secret
+        if ledger_backend not in ("sqlite", "go"):
+            raise ValueError("unknown ledger backend")
+        self.ledger_backend = ledger_backend
         self.probe_timeout_seconds = probe_timeout_seconds
         self.retention_days = max(1, retention_days)
         self.stale_request_seconds = max(30, stale_request_seconds)
@@ -549,7 +553,12 @@ class MonitorService:
         cached = getattr(self, "_token_map", None)
         if cached is None or now - cached[0] > self._TOKEN_MAP_TTL_SECONDS:
             mapping: dict[str, str | None] = {}
-            if self.service_database.is_file():
+            if self.ledger_backend == "go":
+                usage = self.get_token_usage()
+                for token in usage.tokens:
+                    key = token.token_hint
+                    mapping[key] = None if key in mapping else token.token
+            elif self.service_database.is_file():
                 uri = f"file:{self.service_database}?mode=ro"
                 try:
                     with closing(sqlite3.connect(uri, uri=True, timeout=2)) as connection:
@@ -570,25 +579,36 @@ class MonitorService:
         return cached[1].get(str(hint))
 
     def get_token_usage(self) -> TokenUsage:
-        if not self.service_database.is_file():
-            return TokenUsage(available=False)
-        uri = f"file:{self.service_database}?mode=ro"
-        try:
-            with closing(sqlite3.connect(uri, uri=True, timeout=2)) as connection:
-                connection.row_factory = sqlite3.Row
-                rows = connection.execute(
-                    """
-                    SELECT t.token_value, t.token_hint, t.remaining, t.used,
-                           t.enabled, t.expires_at,
-                           COUNT(r.reservation_id) AS pending
-                    FROM api_tokens t
-                    LEFT JOIN token_reservations r
-                      ON r.token_hash = t.token_hash AND r.status = 'pending'
-                    GROUP BY t.token_hash ORDER BY t.created_at
-                    """
-                ).fetchall()
-        except (sqlite3.Error, OSError):
-            return TokenUsage(available=False)
+        if self.ledger_backend == "go":
+            try:
+                data = self.list_token_records()
+                raw_rows = data.get("tokens")
+                if not isinstance(raw_rows, list):
+                    return TokenUsage(available=False)
+                rows = [dict(row, token_value=row.get("token")) for row in raw_rows]
+            except (TokenAdminError, TypeError, ValueError):
+                # A stopped SQLite snapshot must never replace the live Go balances.
+                return TokenUsage(available=False)
+        else:
+            if not self.service_database.is_file():
+                return TokenUsage(available=False)
+            uri = f"file:{self.service_database}?mode=ro"
+            try:
+                with closing(sqlite3.connect(uri, uri=True, timeout=2)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    rows = connection.execute(
+                        """
+                        SELECT t.token_value, t.token_hint, t.remaining, t.used,
+                               t.enabled, t.expires_at,
+                               COUNT(r.reservation_id) AS pending
+                        FROM api_tokens t
+                        LEFT JOIN token_reservations r
+                          ON r.token_hash = t.token_hash AND r.status = 'pending'
+                        GROUP BY t.token_hash ORDER BY t.created_at
+                        """
+                    ).fetchall()
+            except (sqlite3.Error, OSError):
+                return TokenUsage(available=False)
         tokens = [
             TokenState(
                 token=(

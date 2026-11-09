@@ -171,12 +171,12 @@ def cleanup_logs(payload: CleanupRequest, request: Request) -> dict[str, Any]:
     )
 
 
-@router.get("/tokens", summary="List live SQLite token records")
+@router.get("/tokens", summary="List current ledger token records")
 def list_tokens(request: Request) -> dict[str, Any]:
     return _token_result(_service(request).list_token_records)
 
 
-@router.post("/tokens", summary="Create or reset a SQLite token record")
+@router.post("/tokens", summary="Create or reset a ledger token record")
 def create_token(payload: TokenCreateRequest, request: Request) -> dict[str, Any]:
     return _token_result(
         lambda: _service(request).create_token_record(
@@ -185,7 +185,7 @@ def create_token(payload: TokenCreateRequest, request: Request) -> dict[str, Any
     )
 
 
-@router.patch("/tokens/{token_id}", summary="Update a SQLite token record")
+@router.patch("/tokens/{token_id}", summary="Update a ledger token record")
 def update_token(
     token_id: str, payload: TokenUpdateRequest, request: Request
 ) -> dict[str, Any]:
@@ -200,6 +200,6 @@ def update_token(
     )
 
 
-@router.delete("/tokens/{token_id}", summary="Delete a SQLite token record")
+@router.delete("/tokens/{token_id}", summary="Delete a ledger token record")
 def delete_token(token_id: str, request: Request) -> dict[str, Any]:
     return _token_result(lambda: _service(request).delete_token_record(token_id))
